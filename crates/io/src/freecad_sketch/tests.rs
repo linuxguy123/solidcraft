@@ -55,6 +55,48 @@ fn archive(xml: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn circle_centers_on_sketch_axes_retain_geometric_constraints() {
+    for (axis, dimension_type, x, y) in [(-2, 8, 0, 12), (-1, 7, 12, 0)] {
+        let xml = format!(
+            r#"<Document><Objects><Object name="BoltHoles" type="Sketcher::SketchObject"/></Objects>
+        <ObjectData><Object name="BoltHoles"><Properties>
+          <Property name="Geometry"><GeometryList><Geometry type="Part::GeomCircle">
+            <Circle CenterX="{x}" CenterY="{y}" Radius="1.875"/>
+          </Geometry></GeometryList></Property>
+          <Property name="Constraints"><ConstraintList>
+            <Constrain Type="13" First="0" FirstPos="3" Second="{axis}" SecondPos="0"/>
+            <Constrain Type="{dimension_type}" Value="12" First="-1" FirstPos="1" Second="0" SecondPos="3"/>
+            <Constrain Type="18" Value="3.75" First="0"/>
+          </ConstraintList></Property>
+        </Properties></Object></ObjectData></Document>"#
+        );
+        let project = read_freecad_sketches(&archive(xml.as_bytes()), "bolt-holes.FCStd").unwrap();
+        let source = &project.sketches[0];
+        assert!(source.warnings.is_empty(), "the built-in sketch axis is available: {:?}", source.warnings);
+        let mut sketch = source.sketch.clone();
+        let CurveKind::Circle { c: center, .. } = sketch.curves[0].kind else { panic!("expected a circle") };
+        if axis == -2 {
+            assert!(matches!(sketch.constraints[0].kind, ConstraintKind::VerticalPoints { p: 0, q } if q == center));
+        } else {
+            assert!(matches!(sketch.constraints[0].kind, ConstraintKind::HorizontalPoints { p: 0, q } if q == center));
+        }
+        assert!(!sketch.constraints[0].kind.is_dimension(), "point-on-axis must not become an editable zero dimension");
+        assert_eq!(sketch.curves.len(), 1, "axis alignment needs no helper geometry");
+        sketch.points[center].pos = Vec2::new(7.0, 18.0);
+        let solved = solidcraft_sketch::solve(&mut sketch);
+        assert!(solved.ok(), "{solved:?}");
+        assert!((sketch.point(center).unwrap() - Vec2::new(f64::from(x), f64::from(y))).len() < 1e-7);
+        assert!((sketch.radius(0).unwrap() - 1.875).abs() < 1e-7);
+
+        if axis == -2 {
+            let projected = xml.replace("Second=\"-2\"", "Second=\"-3\"");
+            let project = read_freecad_sketches(&archive(projected.as_bytes()), "external.FCStd").unwrap();
+            assert!(project.sketches[0].warnings.iter().any(|warning| warning.detail.contains("external geometry reference -3")));
+        }
+    }
+}
+
+#[test]
 fn basic_operations_retain_profiles_dependencies_dimensions_and_axes() {
     let xml = include_str!("operations_fixture.xml");
     let project = read_freecad_sketches(&archive(xml.as_bytes()), "operations.FCStd").unwrap();
@@ -103,7 +145,7 @@ fn hierarchy_geometry_and_constraints_are_imported() {
     assert!(matches!(profile.sketch.constraints[2].kind, ConstraintKind::Length { value: 40.0, .. }));
     assert!(matches!(profile.sketch.constraints[3].kind, ConstraintKind::Radius { value: 3.0, .. }));
     assert!(matches!(profile.sketch.constraints[4].kind, ConstraintKind::Equal { .. }));
-    assert!(matches!(profile.sketch.constraints[5].kind, ConstraintKind::DistanceY { value: 0.0, .. }));
+    assert!(matches!(profile.sketch.constraints[5].kind, ConstraintKind::HorizontalPoints { .. }));
 
     let loose = project.sketches.iter().find(|s| s.source_name == "Loose").unwrap();
     assert!(matches!(loose.sketch.curves[0].kind, CurveKind::Arc { .. }));

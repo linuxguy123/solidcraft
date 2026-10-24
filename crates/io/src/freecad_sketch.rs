@@ -725,6 +725,12 @@ fn entity_description(object: &RawObject, entity: i32, position: i32) -> Option<
     if entity == -1 && position == 1 {
         return Some("the sketch origin".into());
     }
+    if entity == -1 {
+        return Some("the sketch horizontal (X) axis (FreeCAD reference -1)".into());
+    }
+    if entity == -2 {
+        return Some("the sketch vertical (Y) axis (FreeCAD reference -2)".into());
+    }
     if entity < 0 {
         return Some(format!("external geometry reference {entity}"));
     }
@@ -951,11 +957,10 @@ fn convert_constraint(c: &RawConstraint, maps: &[GeometryMap]) -> Option<Constra
     let second_point = || point_ref(maps, c.second, c.second_pos);
     Some(match c.kind {
         1 => ConstraintKind::Coincident { p: first_point()?, q: second_point()? },
-        // FreeCAD uses Horizontal/Vertical both for a line and for two selected points. SolidCraft
-        // represents the point form as a zero vertical/horizontal distance respectively.
-        2 if c.first_pos != 0 && c.second_pos != 0 => ConstraintKind::DistanceY { p: first_point()?, q: second_point()?, value: 0.0 },
+        // These geometric alignments must remain geometric rather than creating editable zero dimensions.
+        2 if c.first_pos != 0 && c.second_pos != 0 => ConstraintKind::HorizontalPoints { p: first_point()?, q: second_point()? },
         2 => ConstraintKind::Horizontal { l: first_curve()? },
-        3 if c.first_pos != 0 && c.second_pos != 0 => ConstraintKind::DistanceX { p: first_point()?, q: second_point()?, value: 0.0 },
+        3 if c.first_pos != 0 && c.second_pos != 0 => ConstraintKind::VerticalPoints { p: first_point()?, q: second_point()? },
         3 => ConstraintKind::Vertical { l: first_curve()? },
         4 => ConstraintKind::Parallel { a: first_curve()?, b: second_curve()? },
         5 => ConstraintKind::Tangent { a: first_curve()?, b: second_curve()? },
@@ -976,6 +981,10 @@ fn convert_constraint(c: &RawConstraint, maps: &[GeometryMap]) -> Option<Constra
         10 => ConstraintKind::Perpendicular { a: first_curve()?, b: second_curve()? },
         11 => ConstraintKind::Radius { c: first_curve()?, value: c.value.abs() },
         12 => ConstraintKind::Equal { a: first_curve()?, b: second_curve()? },
+        // FreeCAD reserves -1/-2 for the sketch's own infinite axes; projected external geometry
+        // starts at -3. Aligning with the fixed origin preserves point-on-axis without helper lines.
+        13 if c.second == -1 && c.second_pos == 0 => ConstraintKind::HorizontalPoints { p: 0, q: first_point()? },
+        13 if c.second == -2 && c.second_pos == 0 => ConstraintKind::VerticalPoints { p: 0, q: first_point()? },
         13 => ConstraintKind::PointOnCurve { p: first_point()?, c: second_curve()? },
         14 => ConstraintKind::Symmetric { p: first_point()?, q: second_point()?, l: curve_ref(maps, c.third)? },
         18 => ConstraintKind::Diameter { c: first_curve()?, value: c.value.abs() },

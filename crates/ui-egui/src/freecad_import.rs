@@ -41,7 +41,7 @@ impl Dialog {
             preserve_planes: true,
             operations: Vec::new(),
             selected_operations: BTreeSet::new(),
-            import_operations: false,
+            import_operations: true,
             report: None,
             report_message: None,
             error: None,
@@ -329,7 +329,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     )
                 });
             }
-            ui_kit::section(ui, "freecad_sketches", "Sketches", true, |ui| {
+            ui_kit::prominent_section(ui, "freecad_sketches", "Sketches", true, |ui| {
                 for node in &dialog.nodes {
                     draw_node(ui, node, &mut dialog.selected, &mut dialog.detail, dialog.import_operations);
                 }
@@ -337,7 +337,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     ui_kit::text(ui, "This project contains no Sketcher sketches.", ui_kit::Text::Report("empty", true));
                 }
             });
-            ui_kit::section(ui, "freecad_operations", "Operations", true, |ui| {
+            ui_kit::prominent_section(ui, "freecad_operations", "Operations", true, |ui| {
                 if dialog.operations.is_empty() {
                     ui_kit::text(ui, "This project contains no recognized operations.", ui_kit::Text::Note("no_operations"));
                 } else {
