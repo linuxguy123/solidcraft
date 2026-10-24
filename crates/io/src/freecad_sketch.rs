@@ -1,8 +1,8 @@
 //! Editable sketches from FreeCAD `.FCStd` archives.
 //!
 //! This is a clean-room reader of the public ZIP/XML interchange representation. It does not
-//! link to FreeCAD or use its source. Sketch attachment/support links deliberately stay behind:
-//! imported sketches keep their local 2D coordinates on a SolidCraft origin plane.
+//! link to FreeCAD or use its source. Origin and datum plane placements are recovered from saved
+//! frames; unsupported attachments are reported alongside geometry and constraint losses.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Cursor, Read};
@@ -10,10 +10,13 @@ use std::io::{Cursor, Read};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use serde::{Deserialize, Serialize};
-use solidcraft_geom::Vec2;
+use solidcraft_geom::{Plane, Vec2, Vec3};
 use solidcraft_sketch::{ConstraintKind, CurveKind, Sketch};
 
 use crate::{IoError, Result};
+
+mod operations;
+pub use operations::{FreeCadAxis, FreeCadOperation, FreeCadOperationSettings};
 
 /// Largest uncompressed `Document.xml` accepted from an FCStd archive.
 pub const MAX_FREECAD_DOCUMENT_XML: u64 = 64 << 20;
@@ -47,8 +50,21 @@ pub enum FreeCadNodeKind {
 pub struct FreeCadSketchInfo {
     pub geometry: usize,
     pub constraints: usize,
+    #[serde(default)]
+    pub plane: String,
+    #[serde(default)]
+    pub saved_plane_available: bool,
+    #[serde(default)]
+    pub attachment_unresolved: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub warnings: Vec<FreeCadWarning>,
+}
+
+/// A concise import warning with optional technical context for the UI's More dialog.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeCadWarning {
+    pub summary: String,
+    pub detail: String,
 }
 
 /// One converted sketch and its source identity.
@@ -57,8 +73,19 @@ pub struct FreeCadSketch {
     pub source_name: String,
     pub label: String,
     pub path: Vec<String>,
+    /// FreeCAD Part source-name/label pairs, outermost first.
+    pub parts: Vec<(String, String)>,
+    /// The nearest FreeCAD Body source-name/label pair, when the sketch belongs to one.
+    pub body: Option<(String, String)>,
+    pub plane: Plane,
+    /// A shared datum plane, expressed in source-project coordinates.
+    pub datum: Option<(String, String, Plane)>,
+    pub plane_description: String,
+    pub saved_plane: Option<Plane>,
+    pub attachment_unresolved: bool,
+    pub source_curves: Vec<Option<String>>,
     pub sketch: Sketch,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<FreeCadWarning>,
 }
 
 /// The selectable hierarchy and converted sketches in an FCStd file.
@@ -67,6 +94,7 @@ pub struct FreeCadProject {
     pub label: String,
     pub nodes: Vec<FreeCadNode>,
     pub sketches: Vec<FreeCadSketch>,
+    pub operations: Vec<FreeCadOperation>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -77,6 +105,13 @@ struct RawObject {
     children: Vec<String>,
     geometry: Vec<RawGeometry>,
     constraints: Vec<RawConstraint>,
+    /// None means absent; Some(None) means malformed.
+    placement: Option<Option<Plane>>,
+    support: Vec<(String, String)>,
+    map_mode: i32,
+    values: BTreeMap<String, String>,
+    links: BTreeMap<String, (String, Vec<String>)>,
+    expressions: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +157,7 @@ struct RawConstraint {
     second: i32,
     second_pos: i32,
     third: i32,
+    third_pos: i32,
     driving: bool,
     active: bool,
     virtual_space: bool,
@@ -286,7 +322,41 @@ fn parse_document(xml: &[u8], file: &str) -> Result<FreeCadProject> {
 fn apply_empty(e: &BytesStart<'_>, property: &str, current: Option<&mut RawObject>, geometry: Option<&mut RawGeometry>, document_label: &mut String) {
     let tag = e.local_name();
     let a = attrs(e);
+    let mut current = current;
+    if let Some(object) = current.as_deref_mut() {
+        operations::capture(object, tag.as_ref(), property, &a);
+    }
     match tag.as_ref() {
+        b"PropertyPlacement" if property == "Placement" => {
+            if let Some(object) = current {
+                object.placement = Some(read_placement(&a));
+            }
+        }
+        b"Integer" if property == "MapMode" => {
+            if let Some(object) = current {
+                object.map_mode = integer(&a, "value", -1);
+            }
+        }
+        b"Link" if matches!(property, "Support" | "AttachmentSupport") => {
+            if let Some(object) = current {
+                object.support.push((string(&a, "obj"), string(&a, "sub")));
+            }
+        }
+        b"LinkSub" if matches!(property, "Support" | "AttachmentSupport") => {
+            if let Some(object) = current {
+                let name = string(&a, "value");
+                if !name.is_empty() {
+                    object.support.push((name, String::new()));
+                }
+            }
+        }
+        b"Sub" if matches!(property, "Support" | "AttachmentSupport") => {
+            if let Some(object) = current
+                && let Some((_, sub)) = object.support.last_mut()
+            {
+                *sub = string(&a, "value");
+            }
+        }
         b"String" if property == "Label" => {
             let label = string(&a, "value");
             if let Some(object) = current {
@@ -295,7 +365,7 @@ fn apply_empty(e: &BytesStart<'_>, property: &str, current: Option<&mut RawObjec
                 *document_label = label;
             }
         }
-        b"Link" if property == "Group" => {
+        b"Link" if matches!(property, "Group" | "OriginFeatures") => {
             if let Some(object) = current {
                 let child = string(&a, "value");
                 if !child.is_empty() {
@@ -352,6 +422,7 @@ fn apply_empty(e: &BytesStart<'_>, property: &str, current: Option<&mut RawObjec
                     second: integer(&a, "Second", -2000),
                     second_pos: integer(&a, "SecondPos", 0),
                     third: integer(&a, "Third", -2000),
+                    third_pos: integer(&a, "ThirdPos", 0),
                     driving: integer(&a, "IsDriving", 1) != 0,
                     active: integer(&a, "IsActive", 1) != 0,
                     virtual_space: integer(&a, "IsInVirtualSpace", 0) != 0,
@@ -371,17 +442,182 @@ fn object_kind(type_name: &str) -> Option<FreeCadNodeKind> {
     }
 }
 
+fn read_placement(a: &BTreeMap<String, String>) -> Option<Plane> {
+    let value = |key: &str| a.get(key)?.parse::<f64>().ok().filter(|v| v.is_finite());
+    let origin = Vec3::new(value("Px")?, value("Py")?, value("Pz")?);
+    if origin.x.abs().max(origin.y.abs()).max(origin.z.abs()) > 1e9 {
+        return None;
+    }
+    // FreeCAD saves quaternion components as x, y, z, w (Q0 through Q3).
+    let (x, y, z, w) = (value("Q0")?, value("Q1")?, value("Q2")?, value("Q3")?);
+    let norm = x * x + y * y + z * z + w * w;
+    if !norm.is_finite() || norm < 1e-20 {
+        return None;
+    }
+    let scale = norm.sqrt();
+    let (x, y, z, w) = (x / scale, y / scale, z / scale, w / scale);
+    Plane::new(
+        origin,
+        Vec3::new(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)),
+        Vec3::new(2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x)),
+    )
+}
+
+fn compose_frame(parent: Plane, local: Plane) -> Option<Plane> {
+    let rotate = |v: Vec3| parent.x * v.x + parent.y * v.y + parent.normal() * v.z;
+    Plane::new(parent.origin + rotate(local.origin), rotate(local.x), rotate(local.y))
+}
+
+fn global_frame(name: &str, objects: &HashMap<&str, &RawObject>, parents: &HashMap<&str, &str>) -> Option<Plane> {
+    let mut chain = Vec::new();
+    let mut current = name;
+    loop {
+        if chain.len() >= 64 || chain.contains(&current) {
+            return None;
+        }
+        chain.push(current);
+        match parents.get(current) {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    let mut frame = Plane::XY;
+    for name in chain.into_iter().rev() {
+        let object = objects.get(name)?;
+        frame = compose_frame(frame, object.placement.unwrap_or(Some(Plane::XY))?)?;
+    }
+    Some(frame)
+}
+
+fn datum_dependency_exception(name: &str, objects: &HashMap<&str, &RawObject>, depth: usize) -> Option<String> {
+    if depth >= 32 {
+        return Some("The datum support chain is cyclic or too deep.".into());
+    }
+    let object = objects.get(name)?;
+    if object.map_mode == 0 {
+        return None;
+    }
+    for (support, sub) in &object.support {
+        let Some(target) = objects.get(support.as_str()) else {
+            return Some(format!("The datum refers to missing support `{support}`."));
+        };
+        if !sub.is_empty() || !matches!(target.type_name.as_str(), "App::Plane" | "PartDesign::Plane") {
+            return Some(format!("The datum depends on `{support}` ({}) subelement `{sub}`.", target.type_name));
+        }
+        if target.type_name == "PartDesign::Plane"
+            && let Some(reason) = datum_dependency_exception(support, objects, depth + 1)
+        {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn recover_plane(object: &RawObject, objects: &HashMap<&str, &RawObject>, parents: &HashMap<&str, &str>, sketch: &mut FreeCadSketch) {
+    sketch.saved_plane = global_frame(&object.source_name, objects, parents);
+    let fallback = |sketch: &mut FreeCadSketch, reason: String| {
+        sketch.attachment_unresolved = true;
+        sketch.plane_description = "XY (attachment not preserved)".into();
+        warn(
+            &mut sketch.warnings,
+            "The sketch attachment could not be preserved; the sketch will use XY.",
+            format!("{reason} Local sketch geometry and constraints are retained. Use Redefine Sketch Plane after import to choose a new support."),
+        );
+    };
+    if object.map_mode != 0 {
+        if object.support.len() != 1 {
+            fallback(sketch, "The active attachment does not reference exactly one plane.".into());
+            return;
+        }
+        let Some((support_name, sub)) = object.support.first() else { return };
+        let Some(support) = objects.get(support_name.as_str()) else {
+            fallback(sketch, format!("The support object `{support_name}` is missing from Document.xml."));
+            return;
+        };
+        if !sub.is_empty() || !matches!(support.type_name.as_str(), "App::Plane" | "PartDesign::Plane") {
+            fallback(
+                sketch,
+                format!(
+                    "The sketch is attached to `{support_name}` ({}) subelement `{sub}`. Face, edge and vertex attachments are not imported yet.",
+                    support.type_name
+                ),
+            );
+            return;
+        }
+        if object.placement.is_none() {
+            fallback(sketch, "The attached sketch has no saved resolved Placement.".into());
+            return;
+        }
+        if support.type_name == "PartDesign::Plane" {
+            let Some(frame) = global_frame(support_name, objects, parents) else {
+                fallback(sketch, format!("Datum plane `{support_name}` has an invalid placement or parent chain."));
+                return;
+            };
+            let label = if support.label.is_empty() { support_name.clone() } else { support.label.clone() };
+            sketch.datum = Some((support_name.clone(), label.clone(), frame));
+            sketch.plane_description = format!("Datum plane: {label}");
+            if let Some(reason) = datum_dependency_exception(support_name, objects, 0) {
+                warn(
+                    &mut sketch.warnings,
+                    "The datum plane will retain its saved position, but its source dependency is removed.",
+                    format!(
+                        "{reason} The imported construction plane uses the saved position and orientation. It will not follow changes to the original FreeCAD support."
+                    ),
+                );
+            }
+        } else {
+            sketch.plane_description = format!("Origin plane: {}", support.label);
+        }
+    } else {
+        sketch.plane_description = "Saved sketch plane".into();
+    }
+    match global_frame(&object.source_name, objects, parents) {
+        Some(frame) => {
+            sketch.plane = frame;
+            if let Some((_, _, datum)) = &sketch.datum {
+                let delta = frame.origin - datum.origin;
+                let sideways = delta - datum.normal() * delta.dot(datum.normal());
+                if sideways.len() > 1e-7 || frame.normal().dot(datum.normal()) < 1.0 - 1e-10 {
+                    warn(
+                        &mut sketch.warnings,
+                        "The sketch plane is preserved, but its complex datum attachment becomes independent.",
+                        "The attachment includes a translation within the datum plane or a tilt relative to it. The imported sketch keeps its saved position and orientation, but does not follow edits to the imported datum plane. Normal offsets and rotation within a datum plane retain their attachment.",
+                    );
+                }
+            }
+        }
+        None => {
+            sketch.datum = None;
+            fallback(sketch, "The saved sketch or parent placement is invalid or cyclic.".into());
+        }
+    }
+}
+
 fn project(label: String, objects: Vec<RawObject>, file: &str) -> Result<FreeCadProject> {
+    let by_name: HashMap<&str, &RawObject> = objects.iter().map(|o| (o.source_name.as_str(), o)).collect();
+    let mut parents = HashMap::new();
+    for parent in &objects {
+        if matches!(object_kind(&parent.type_name), Some(FreeCadNodeKind::Part | FreeCadNodeKind::Body)) || parent.type_name == "App::Origin" {
+            for child in &parent.children {
+                parents.insert(child.as_str(), parent.source_name.as_str());
+            }
+        }
+        if let Some((origin, _)) = parent.links.get("Origin")
+            && !origin.is_empty()
+        {
+            parents.insert(origin.as_str(), parent.source_name.as_str());
+        }
+    }
     let mut sketches = Vec::new();
     let mut sketch_by_name = HashMap::new();
     for object in &objects {
         if object_kind(&object.type_name) == Some(FreeCadNodeKind::Sketch) {
-            let sketch = convert_sketch(object);
+            let mut sketch = convert_sketch(object);
+            recover_plane(object, &by_name, &parents, &mut sketch);
             sketch_by_name.insert(object.source_name.clone(), sketches.len());
             sketches.push(sketch);
         }
     }
-    let by_name: HashMap<&str, &RawObject> = objects.iter().map(|o| (o.source_name.as_str(), o)).collect();
     let referenced: BTreeSet<&str> = objects
         .iter()
         .filter(|o| matches!(object_kind(&o.type_name), Some(FreeCadNodeKind::Part | FreeCadNodeKind::Body)))
@@ -391,7 +627,7 @@ fn project(label: String, objects: Vec<RawObject>, file: &str) -> Result<FreeCad
     let mut nodes = Vec::new();
     for object in &objects {
         if object_kind(&object.type_name).is_some() && !referenced.contains(object.source_name.as_str()) {
-            if let Some(node) = build_node(&object.source_name, &by_name, &sketch_by_name, &mut sketches, &mut seen, &[], 0) {
+            if let Some(node) = build_node(&object.source_name, &by_name, &sketch_by_name, &mut sketches, &mut seen, &[], &[], None, 0) {
                 nodes.push(node);
             }
         }
@@ -400,7 +636,7 @@ fn project(label: String, objects: Vec<RawObject>, file: &str) -> Result<FreeCad
     for object in &objects {
         if object_kind(&object.type_name).is_some()
             && !seen.contains(object.source_name.as_str())
-            && let Some(node) = build_node(&object.source_name, &by_name, &sketch_by_name, &mut sketches, &mut seen, &[], 0)
+            && let Some(node) = build_node(&object.source_name, &by_name, &sketch_by_name, &mut sketches, &mut seen, &[], &[], None, 0)
         {
             nodes.push(node);
         }
@@ -410,7 +646,8 @@ fn project(label: String, objects: Vec<RawObject>, file: &str) -> Result<FreeCad
         .map(|s| s.to_string_lossy().trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "FreeCAD project".into());
-    Ok(FreeCadProject { label: if label.trim().is_empty() { fallback } else { label }, nodes, sketches })
+    let operations = operations::collect(&objects, &by_name, &parents);
+    Ok(FreeCadProject { label: if label.trim().is_empty() { fallback } else { label }, nodes, sketches, operations })
 }
 
 fn build_node(
@@ -420,6 +657,8 @@ fn build_node(
     sketches: &mut [FreeCadSketch],
     seen: &mut BTreeSet<String>,
     parent_path: &[String],
+    parent_parts: &[(String, String)],
+    parent_body: Option<(String, String)>,
     depth: usize,
 ) -> Option<FreeCadNode> {
     if depth > 32 || !seen.insert(name.to_string()) {
@@ -430,24 +669,87 @@ fn build_node(
     let label = if object.label.trim().is_empty() { name.to_string() } else { object.label.trim().chars().take(256).collect() };
     let mut path = parent_path.to_vec();
     path.push(label.clone());
+    let mut parts = parent_parts.to_vec();
+    if kind == FreeCadNodeKind::Part {
+        parts.push((object.source_name.clone(), label.clone()));
+    }
+    let body = if kind == FreeCadNodeKind::Body { Some((object.source_name.clone(), label.clone())) } else { parent_body };
     let mut children = Vec::new();
     for child in &object.children {
-        if let Some(node) = build_node(child, objects, sketch_by_name, sketches, seen, &path, depth + 1) {
+        if let Some(node) = build_node(child, objects, sketch_by_name, sketches, seen, &path, &parts, body.clone(), depth + 1) {
             children.push(node);
         }
     }
     let sketch = sketch_by_name.get(name).and_then(|i| sketches.get_mut(*i)).map(|s| {
         s.path = path;
-        FreeCadSketchInfo { geometry: s.sketch.curves.len(), constraints: s.sketch.constraints.len(), warnings: s.warnings.clone() }
+        s.parts = parts;
+        s.body = body;
+        FreeCadSketchInfo {
+            geometry: s.sketch.curves.len(),
+            constraints: s.sketch.constraints.len(),
+            plane: s.plane_description.clone(),
+            saved_plane_available: s.saved_plane.is_some(),
+            attachment_unresolved: s.attachment_unresolved,
+            warnings: s.warnings.clone(),
+        }
     });
     Some(FreeCadNode { source_name: name.to_string(), label, kind, children, sketch })
 }
 
-fn warn(warnings: &mut Vec<String>, message: impl Into<String>) {
-    let message = message.into();
-    if warnings.len() < MAX_WARNINGS && !warnings.contains(&message) {
-        warnings.push(message);
+fn warn(warnings: &mut Vec<FreeCadWarning>, summary: impl Into<String>, detail: impl Into<String>) {
+    let warning = FreeCadWarning { summary: summary.into(), detail: detail.into() };
+    if warnings.len() < MAX_WARNINGS && !warnings.contains(&warning) {
+        warnings.push(warning);
     }
+}
+
+fn geometry_name(type_name: &str) -> String {
+    match type_name {
+        "Part::GeomLineSegment" => "line segment".into(),
+        "Part::GeomCircle" => "circle".into(),
+        "Part::GeomArcOfCircle" => "circular arc".into(),
+        "Part::GeomEllipse" => "ellipse".into(),
+        "Part::GeomBSplineCurve" => "B-spline curve".into(),
+        "Part::GeomBezierCurve" => "Bézier curve".into(),
+        "Part::GeomArcOfEllipse" => "elliptical arc".into(),
+        "Part::GeomHyperbola" | "Part::GeomArcOfHyperbola" => "hyperbola".into(),
+        "Part::GeomParabola" | "Part::GeomArcOfParabola" => "parabola".into(),
+        _ => type_name.rsplit("::").next().unwrap_or("unknown geometry").trim_start_matches("Geom").to_string(),
+    }
+}
+
+fn entity_description(object: &RawObject, entity: i32, position: i32) -> Option<String> {
+    if entity == -2000 {
+        return None;
+    }
+    if entity == -1 && position == 1 {
+        return Some("the sketch origin".into());
+    }
+    if entity < 0 {
+        return Some(format!("external geometry reference {entity}"));
+    }
+    let index = usize::try_from(entity).ok()?;
+    let geometry = object.geometry.get(index);
+    let kind = geometry.map(|g| geometry_name(&g.type_name)).unwrap_or_else(|| "missing geometry".into());
+    let element = match position {
+        1 => ", start point",
+        2 => ", end point",
+        3 => ", center point",
+        _ => "",
+    };
+    Some(format!("geometry {} ({kind}{element}; FreeCAD index {entity})", index + 1))
+}
+
+fn constraint_entities(object: &RawObject, constraint: &RawConstraint) -> String {
+    [
+        entity_description(object, constraint.first, constraint.first_pos),
+        entity_description(object, constraint.second, constraint.second_pos),
+        entity_description(object, constraint.third, constraint.third_pos),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 fn convert_sketch(object: &RawObject) -> FreeCadSketch {
@@ -473,7 +775,16 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
                 }
             }
             GeometryData::Unsupported => {
-                warn(&mut warnings, format!("geometry {} ({}) is not supported", index + 1, geometry.type_name));
+                let name = geometry_name(&geometry.type_name);
+                warn(
+                    &mut warnings,
+                    format!("Geometry {} is a {name}, which SolidCraft does not import yet.", index + 1),
+                    format!(
+                        "FreeCAD geometry {} has type `{}`. The importer currently supports line segments, circles, circular arcs and ellipses. Constraints that refer to this geometry may also be skipped.",
+                        index + 1,
+                        geometry.type_name
+                    ),
+                );
                 maps.push(GeometryMap::default());
                 continue;
             }
@@ -495,7 +806,11 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
             }
             Err(e) => {
                 sketch.points.truncate(before_points);
-                warn(&mut warnings, format!("geometry {} ({}) was skipped: {e}", index + 1, geometry.type_name));
+                warn(
+                    &mut warnings,
+                    format!("Geometry {} could not be imported because its values are invalid.", index + 1),
+                    format!("FreeCAD geometry {} has type `{}`. SolidCraft rejected it with: {e}", index + 1, geometry.type_name),
+                );
                 maps.push(GeometryMap::default());
             }
         }
@@ -510,15 +825,39 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
             {
                 c.fixed = true;
             } else {
-                warn(&mut warnings, format!("constraint {} (block) refers to skipped geometry", index + 1));
+                let entities = constraint_entities(object, constraint);
+                warn(
+                    &mut warnings,
+                    format!("Constraint {} fixes geometry that could not be imported.", index + 1),
+                    format!("FreeCAD constraint {} is a Block constraint. Referenced entity: {entities}.", index + 1),
+                );
             }
             continue;
         }
         let Some(kind) = convert_constraint(constraint, &maps) else {
-            warn(
-                &mut warnings,
-                format!("constraint {} (FreeCAD type {}) is not supported or refers to skipped geometry", index + 1, constraint.kind),
-            );
+            let entities = constraint_entities(object, constraint);
+            if constraint_name(constraint.kind).is_some() {
+                warn(
+                    &mut warnings,
+                    format!("Constraint {} refers to geometry that could not be imported.", index + 1),
+                    format!(
+                        "FreeCAD constraint {} is {} (type {}). Referenced entities: {entities}. At least one referenced point or curve is unavailable in the imported sketch.",
+                        index + 1,
+                        constraint_name(constraint.kind).unwrap_or("a supported constraint"),
+                        constraint.kind
+                    ),
+                );
+            } else {
+                warn(
+                    &mut warnings,
+                    format!("Constraint {} uses a FreeCAD constraint type that SolidCraft does not import yet.", index + 1),
+                    format!(
+                        "FreeCAD constraint {} has numeric type {}. Referenced entities: {entities}. Supported constraints include coincident, horizontal, vertical, parallel, tangent, distance, angle, perpendicular, radius, equal, point-on-object, symmetry, block and diameter.",
+                        index + 1,
+                        constraint.kind
+                    ),
+                );
+            }
             continue;
         };
         match sketch.add_constraint(kind, None) {
@@ -529,16 +868,58 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
                     last.driven = true;
                 }
             }
-            Err(e) => warn(&mut warnings, format!("constraint {} was skipped: {e}", index + 1)),
+            Err(e) => {
+                let entities = constraint_entities(object, constraint);
+                warn(
+                    &mut warnings,
+                    format!("Constraint {} could not be represented in this sketch.", index + 1),
+                    format!(
+                        "FreeCAD constraint {} is {} (type {}). Referenced entities: {entities}. SolidCraft rejected it with: {e}",
+                        index + 1,
+                        constraint_name(constraint.kind).unwrap_or("an unknown constraint"),
+                        constraint.kind
+                    ),
+                );
+            }
         }
     }
     FreeCadSketch {
         source_name: object.source_name.clone(),
         label: if object.label.trim().is_empty() { object.source_name.clone() } else { object.label.trim().chars().take(256).collect() },
         path: Vec::new(),
+        parts: Vec::new(),
+        body: None,
+        plane: Plane::XY,
+        datum: None,
+        plane_description: "XY".into(),
+        saved_plane: None,
+        attachment_unresolved: false,
+        source_curves: maps.iter().map(|map| map.curve.and_then(|index| sketch.curves.get(index)).map(|curve| curve.id.clone())).collect(),
         sketch,
         warnings,
     }
+}
+
+fn constraint_name(kind: i32) -> Option<&'static str> {
+    Some(match kind {
+        1 => "Coincident",
+        2 => "Horizontal",
+        3 => "Vertical",
+        4 => "Parallel",
+        5 => "Tangent",
+        6 => "Distance or Length",
+        7 => "Horizontal Distance",
+        8 => "Vertical Distance",
+        9 => "Angle",
+        10 => "Perpendicular",
+        11 => "Radius",
+        12 => "Equal",
+        13 => "Point on Object",
+        14 => "Symmetry",
+        17 => "Block",
+        18 => "Diameter",
+        _ => return None,
+    })
 }
 
 fn curve_ref(maps: &[GeometryMap], entity: i32) -> Option<usize> {
@@ -570,7 +951,11 @@ fn convert_constraint(c: &RawConstraint, maps: &[GeometryMap]) -> Option<Constra
     let second_point = || point_ref(maps, c.second, c.second_pos);
     Some(match c.kind {
         1 => ConstraintKind::Coincident { p: first_point()?, q: second_point()? },
+        // FreeCAD uses Horizontal/Vertical both for a line and for two selected points. SolidCraft
+        // represents the point form as a zero vertical/horizontal distance respectively.
+        2 if c.first_pos != 0 && c.second_pos != 0 => ConstraintKind::DistanceY { p: first_point()?, q: second_point()?, value: 0.0 },
         2 => ConstraintKind::Horizontal { l: first_curve()? },
+        3 if c.first_pos != 0 && c.second_pos != 0 => ConstraintKind::DistanceX { p: first_point()?, q: second_point()?, value: 0.0 },
         3 => ConstraintKind::Vertical { l: first_curve()? },
         4 => ConstraintKind::Parallel { a: first_curve()?, b: second_curve()? },
         5 => ConstraintKind::Tangent { a: first_curve()?, b: second_curve()? },

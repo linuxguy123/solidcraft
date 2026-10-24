@@ -128,6 +128,110 @@ fn sketch_archive() -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
+fn operations_archive(xml: &str) -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file("Document.xml", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.write_all(xml.as_bytes()).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+#[test]
+fn freecad_operations_import_dependencies_target_only_their_body_and_undo_together() {
+    let xml = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml");
+    let (dir, path) = file("operations", "source.FCStd", &operations_archive(xml));
+    let mut session = Session::default();
+    run(&mut session, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Unrelated"}));
+    let imported = run(
+        &mut session,
+        "file.import_freecad_sketches",
+        json!({
+            "path":path,"sketches":[],"import_operations":true,"operations":["Pocket"],"organization":"flat"
+        }),
+    );
+    let operations = imported["operations"].as_array().unwrap();
+    assert_eq!(operations.len(), 2, "the Pad dependency is included automatically");
+    assert_eq!(operations[0]["source"], "Pad");
+    assert!(operations.iter().all(|op| op["status"] == "imported"), "{operations:?}");
+    assert!((volume(&mut session) - 6900.0).abs() < 1e-6, "Pocket cuts Plate only, not the overlapping Unrelated body");
+    assert_eq!(session.undo.len(), 2, "one undo step for the complete import");
+    let id = operations[1]["feature"].as_u64().unwrap();
+    assert!(!session.doc.feature(id).unwrap().param_names.is_empty(), "the imported feature has editable dimensions");
+    run(&mut session, "edit.undo", json!({}));
+    assert!((volume(&mut session) - 1000.0).abs() < 1e-6);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn freecad_revolution_and_groove_keep_the_axis_sweep_and_dimensions() {
+    let xml = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml");
+    let (dir, path) = file("revolve-operations", "source.FCStd", &operations_archive(xml));
+    let mut session = Session::default();
+    let imported =
+        run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Revolution"]}));
+    assert_eq!(imported["operations"][0]["status"], "imported", "{imported}");
+    let expected = std::f64::consts::PI * 75.0 * 15.0 * 0.75;
+    assert!((volume(&mut session) - expected).abs() < 1e-5);
+    let measured = run(&mut session, "inspect.measure", json!({}));
+    let center = measured["bodies"][0]["center_of_mass"].as_array().unwrap();
+    let radial_center = -3500.0 / (675.0 * std::f64::consts::PI);
+    for (coordinate, expected) in center.iter().zip([radial_center, 7.5, radial_center]) {
+        assert!((coordinate.as_f64().unwrap() - expected).abs() < 1e-5, "right-hand rotation about FreeCAD's +Y axis: {measured}");
+    }
+    run(&mut session, "edit.undo", json!({}));
+    let imported =
+        run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Groove"]}));
+    assert!(imported["operations"].as_array().unwrap().iter().all(|op| op["status"] == "imported"), "{imported}");
+    assert!((volume(&mut session) - (expected - std::f64::consts::PI * 36.0 * 5.0 * 0.5)).abs() < 1e-5);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn freecad_face_attached_operation_keeps_its_saved_plane_and_waits_for_repair() {
+    let xml = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml");
+    let xml = xml.replace("<Object name=\"PocketProfile\"><Properties>", "<Object name=\"PocketProfile\"><Properties><Property name=\"MapMode\"><Integer value=\"5\"/></Property><Property name=\"AttachmentSupport\"><LinkSubList><Link obj=\"Pad\" sub=\"Face6\"/></LinkSubList></Property>");
+    let (dir, path) = file("repair-operations", "source.FCStd", &operations_archive(&xml));
+    let mut session = Session::default();
+    let imported =
+        run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Pocket"]}));
+    let operations = imported["operations"].as_array().unwrap();
+    assert_eq!(operations[0]["status"], "imported");
+    assert_eq!(operations[1]["status"], "needs_repair");
+    let feature = session.doc.feature(operations[1]["feature"].as_u64().unwrap()).unwrap();
+    assert!(feature.suppressed);
+    let solidcraft_doc::FeatureKind::Extrude { sketch, .. } = &feature.kind else { panic!("expected native Pocket") };
+    let plane = session.model.state().sketch(sketch.0).unwrap().plane;
+    assert!((plane.origin.z - 10.0).abs() < 1e-9, "the face-attached sketch keeps its saved location");
+    assert!((volume(&mut session) - 6000.0).abs() < 1e-6);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn freecad_unsupported_history_blocks_dependents_and_cycles_do_not_change_the_design() {
+    let xml = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml");
+    let unsupported = xml.replace("type=\"PartDesign::Pad\"", "type=\"PartDesign::Fillet\"");
+    let (dir, path) = file("unsupported-operations", "source.FCStd", &operations_archive(&unsupported));
+    let mut session = Session::default();
+    let imported =
+        run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Pocket"]}));
+    assert_eq!(imported["operations"][0]["status"], "skipped");
+    assert_eq!(imported["operations"][1]["status"], "needs_repair");
+    assert!(session.model.state().bodies.is_empty(), "skipping an unsupported predecessor must not enable a later cut");
+    let _ = std::fs::remove_dir_all(dir);
+
+    let cyclic = xml.replace(
+        "<Object name=\"Pad\"><Properties>",
+        "<Object name=\"Pad\"><Properties><Property name=\"BaseFeature\"><Link value=\"Pocket\"/></Property>",
+    );
+    let (dir, path) = file("cyclic-operations", "source.FCStd", &operations_archive(&cyclic));
+    let before = session.doc.clone();
+    let error = session
+        .execute("file.import_freecad_sketches", &json!({"path":path,"sketches":[],"import_operations":true,"operations":["Pocket"]}))
+        .unwrap_err();
+    assert!(error.to_string().contains("cycle"), "{error}");
+    assert_eq!(session.doc, before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn freecad_sketches_can_be_inspected_and_selectively_imported_in_one_undo_step() {
     let bytes = sketch_archive();
@@ -146,13 +250,28 @@ fn freecad_sketches_can_be_inspected_and_selectively_imported_in_one_undo_step()
     assert_eq!(s.doc.features.len(), 1);
     let feature = &s.doc.features[0];
     assert_eq!(feature.name, "Mounting Profile");
+    assert_eq!(s.doc.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>(), ["Bracket"]);
+    assert_eq!(s.doc.browser_groups.len(), 1);
+    assert_eq!((s.doc.browser_groups[0].name.as_str(), s.doc.browser_groups[0].folder.as_str()), ("Plate", "sketches"));
+    assert_eq!(s.doc.browser_groups[0].items, [feature.id.to_string()]);
+    assert_eq!(feature.component, s.doc.components[0].id);
     let solidcraft_doc::FeatureKind::Sketch { plane: solidcraft_doc::PlaneRef::Origin { name }, sketch } = &feature.kind else {
         panic!("import did not make a sketch")
     };
     assert_eq!(name, "XY");
     assert_eq!((sketch.curves.len(), sketch.constraints.len()), (2, 3));
+    let dimension = sketch.constraints.iter().find(|constraint| matches!(constraint.kind, solidcraft_sketch::ConstraintKind::Length { .. })).unwrap();
+    let parameter = dimension.param.as_deref().expect("an imported driving dimension is editable");
+    assert!(s.doc.param(parameter).is_some(), "the dimension's model parameter exists");
     assert_eq!(s.undo.len(), 1, "all selected sketches are one command and one undo step");
     run(&mut s, "edit.undo", json!({}));
-    assert!(s.doc.features.is_empty());
+    assert!(s.doc.features.is_empty() && s.doc.components.is_empty() && s.doc.browser_groups.is_empty());
+
+    let imported =
+        run(&mut s, "file.import_freecad_sketches", json!({"path": path, "sketches": ["Profile"], "organization": "flat", "naming": "body"}));
+    assert_eq!(imported["organization"], "flat");
+    assert_eq!(s.doc.features[0].name, "Plate — Mounting Profile");
+    assert_eq!(s.doc.features[0].component, 0);
+    assert!(s.doc.components.is_empty() && s.doc.browser_groups.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -68,11 +68,28 @@ IGES 5.3 files (`.igs`/`.iges`) open, insert and drop the same way: `crates/kern
 
 FreeCAD `.FCStd` and Rhino `.3dm` files open, insert and drop the same way, in the desktop app, the browser app and the CLI. They are read with [cadmpeg](https://github.com/cadmpeg/cadmpeg) (Apache-2.0, `crates/io/src/native_cad.rs`): cadmpeg detects the format from the bytes, decodes it into its neutral model under resource caps, checks that model and writes it as STEP AP214, which the STEP reader then reads. The feature holds that STEP text, so the design reopens without the original file. The file's solids come in; its feature history, sketches and parameters do not. Losses cadmpeg reports become warnings on the feature, and a file without an importable solid is refused with a message. cadmpeg runs inside the panic guard. How much of a file is read follows cadmpeg's support for that format ([format support](https://github.com/cadmpeg/cadmpeg/blob/main/docs/format-support.md)).
 
-FreeCAD sketches have a separate editable import path. **File > Import FreeCAD Sketches…** reads the
+FreeCAD sketches have a separate editable import path. **File > Import FreeCAD…** reads the
 project's Part, Body and Sketch hierarchy and lets the user select individual sketches. Supported sketch
 geometry, dimensions and constraints are converted on a best-effort basis, with skipped items reported as
-warnings. Attachment and support references are intentionally not carried across: imported sketches use
-their local 2D coordinates on the design's XY origin plane and can be reassigned afterward. The import is
-one command and one undo step.
+warnings. Origin and datum plane placements are preserved, including Part/Body transforms and saved sketch
+offsets and rotations. Shared datum planes become construction planes. Normal offsets and in-plane rotations
+retain a link to that plane; more complex attachments retain their saved frame independently and report this
+exception. Datum dependencies on faces are frozen at their saved placement with a warning. Sketches attached
+directly to faces, edges or vertices fall back to XY with an explanation. Unchecking **Preserve non-face sketch
+planes** puts all sketches on XY. Planes can be reassigned afterward. The import is
+one command and one undo step. The default organization maps FreeCAD Parts to nested SolidCraft components
+and FreeCAD Bodies to named groups in their component's Sketches folder. A flat mode imports into the active
+component with original, Body-prefixed or full-path sketch names. Each skipped-item warning has a concise
+description and a **More…** dialog with its FreeCAD type, references and detailed reason.
+
+The optional **Import supported operations** mode rebuilds Pad/Pocket as native Extrude new/join/cut and
+Revolution/Groove as native Revolve new/join/cut. Selection includes required profile sketches and base
+operations; evaluation follows their dependency graph, with explicit body targets. Supported extents are
+fixed, reversed, symmetric, two-sided, and through-all Pocket. Other extent modes and taper require repair.
+Source face attachments retain their saved sketch plane and leave the operation suppressed for reattachment.
+An operation that fails to rebuild, or depends on an unsupported operation, is suppressed when it can be
+represented; operations without a usable profile, axis or dimensions are skipped and explained in the report.
+Unsupported operations are never silently bypassed to enable their dependents. Numeric dimensions remain
+editable; FreeCAD expressions and spreadsheet links are not translated. All additions form one undo step.
 
 Only codecs for open formats are compiled in: the workspace turns off cadmpeg's default features and enables `fcstd`, `rhino` and `step` (the writer). cadmpeg's codecs for commercial CAD formats are not built, and neither is its `sat` codec, which decodes ShapeManager streams with ACIS as one dialect, so ACIS `.sat`/`.sab` files are not read yet. `crates/io/src/native_cad.rs` is the one place cadmpeg is called; a cadmpeg-based STEP reader could be added there later behind a setting, to compare with the STEP reader above without changing it.

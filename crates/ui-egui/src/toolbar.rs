@@ -678,7 +678,7 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     app.start("pointcloud.insert");
                     close = true;
                 }
-                if item_if(ui, "Import FreeCAD Sketches…", "", "import", shown) {
+                if item_if(ui, "Import FreeCAD…", "", "import", shown) {
                     FileAction::ImportFreeCadSketches.run(app);
                     close = true;
                 }
