@@ -75,14 +75,14 @@ warnings. Origin and datum plane placements are preserved, including Part/Body t
 offsets and rotations. Shared datum planes become construction planes. Normal offsets and in-plane rotations
 retain a link to that plane; more complex attachments retain their saved frame independently and report this
 exception. Datum dependencies on faces are frozen at their saved placement with a warning. Sketches attached
-directly to faces, edges or vertices fall back to XY with an explanation. Unchecking **Preserve non-face sketch
-planes** puts all sketches on XY. Planes can be reassigned afterward. The import is
+directly to faces, edges or vertices fall back to XY in sketch-only mode with an explanation. Disabling operation
+import and unchecking **Preserve non-face sketch planes** puts all sketches on XY. Planes can be reassigned afterward. The import is
 one command and one undo step. The default organization maps FreeCAD Parts to nested SolidCraft components
 and FreeCAD Bodies to named groups in their component's Sketches folder. A flat mode imports into the active
 component with original, Body-prefixed or full-path sketch names. Each skipped-item warning has a concise
 description and a **More…** dialog with its FreeCAD type, references and detailed reason.
 
-The optional **Import supported operations** mode rebuilds Pad/Pocket as native Extrude new/join/cut and
+The **Import supported operations** mode, enabled by default, rebuilds Pad/Pocket as native Extrude new/join/cut and
 Revolution/Groove as native Revolve new/join/cut. Selection includes required profile sketches and base
 operations; evaluation follows their dependency graph, with explicit body targets. Supported extents are
 fixed, reversed, symmetric, two-sided, and through-all Pocket. Other extent modes and taper require repair.

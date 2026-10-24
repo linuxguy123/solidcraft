@@ -23,15 +23,15 @@ To bring editable FreeCAD sketches into an existing design, choose **File > Impo
 SolidCraft lists the Parts, Bodies and Sketches found in the project so you can select the sketches to add.
 Supported geometry, dimensions and constraints are retained on a best-effort basis. Each imported sketch
 keeps its saved origin or datum plane where possible, including parent placements, offsets and orientation.
-Datum planes become named construction planes shared by their sketches. Face attachments fall back to XY;
+Datum planes become named construction planes shared by their sketches. In sketch-only mode, face attachments fall back to XY;
 complex datum attachments keep their saved sketch plane independently. Exceptions have a **More…** explanation.
-Untick **Preserve non-face sketch planes** to put every sketch on XY. By default, FreeCAD Parts become
+Disable operation import and untick **Preserve non-face sketch planes** to put every sketch on XY. By default, FreeCAD Parts become
 nested SolidCraft components and each FreeCAD Body becomes a named group in that component's Sketches
 folder. A flat import can instead put everything in the active component and optionally prefix sketch names
 with the Body or full Part/Body path. Skipped items have a short explanation and a **More…** action with the
 source entity, technical reason, supported alternatives and affected references.
 
-Enable **Import supported operations** to rebuild selected Pads, Pockets, Revolutions and Grooves as
+**Import supported operations** is enabled by default to rebuild selected Pads, Pockets, Revolutions and Grooves as
 editable SolidCraft Extrude and Revolve features. Required sketches and preceding operations are included
 automatically. Each cut or join targets its original Body's imported solid. Fixed lengths and angles,
 reversed directions, symmetric and two-sided extents, and through-all Pockets are supported.
