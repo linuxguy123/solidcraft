@@ -206,6 +206,42 @@ fn freecad_face_attached_operation_keeps_its_saved_plane_and_waits_for_repair() 
 }
 
 #[test]
+fn freecad_skipped_operation_placeholders_survive_reopening_and_never_change_geometry() {
+    let xml =
+        include_str!("../../../io/src/freecad_sketch/operations_fixture.xml").replace("type=\"PartDesign::Pocket\"", "type=\"PartDesign::Fillet\"");
+    let (dir, path) = file("placeholder-operations", "source.FCStd", &operations_archive(&xml));
+    let mut session = Session::default();
+    let before = session.doc.clone();
+    let imported =
+        run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Pocket"]}));
+    let pad = imported["operations"][0]["feature"].as_u64().unwrap();
+    let missing = imported["operations"][1]["feature"].as_u64().unwrap();
+    assert_eq!(imported["operations"][1]["status"], "skipped");
+    let feature = session.doc.feature(missing).unwrap();
+    assert_eq!(feature.name, "[Not imported] Pocket");
+    assert_eq!(feature.component, session.doc.feature(pad).unwrap().component);
+    assert!(session.doc.feature_index(pad).unwrap() < session.doc.feature_index(missing).unwrap());
+    assert!(session.model.result(missing).unwrap().warning.as_ref().unwrap().contains("was not imported"));
+    assert!((volume(&mut session) - 6000.0).abs() < 1e-6);
+    let reopened = solidcraft_doc::Document::from_json(&session.doc.to_json()).unwrap();
+    assert_eq!(reopened.feature(missing), session.doc.feature(missing));
+    let mut model = solidcraft_doc::Model::new();
+    model.evaluate(&reopened);
+    assert!(model.result(missing).unwrap().error.is_none());
+    assert!(model.result(missing).unwrap().warning.is_some());
+    assert_eq!(model.state().bodies.len(), 1);
+    // Suppression cannot turn a placeholder into a modelling operation.
+    run(&mut session, "timeline.suppress", json!({"feature":missing,"suppressed":true}));
+    run(&mut session, "timeline.suppress", json!({"feature":missing,"suppressed":false}));
+    assert!((volume(&mut session) - 6000.0).abs() < 1e-6);
+    run(&mut session, "edit.undo", json!({}));
+    run(&mut session, "edit.undo", json!({}));
+    run(&mut session, "edit.undo", json!({}));
+    assert_eq!(session.doc, before, "the import, including placeholders, is one undo step");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn freecad_unsupported_history_blocks_dependents_and_cycles_do_not_change_the_design() {
     let xml = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml");
     let unsupported = xml.replace("type=\"PartDesign::Pad\"", "type=\"PartDesign::Fillet\"");
@@ -215,6 +251,10 @@ fn freecad_unsupported_history_blocks_dependents_and_cycles_do_not_change_the_de
         run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Pocket"]}));
     assert_eq!(imported["operations"][0]["status"], "skipped");
     assert_eq!(imported["operations"][1]["status"], "needs_repair");
+    let placeholder = session.doc.feature(imported["operations"][0]["feature"].as_u64().unwrap()).unwrap();
+    assert!(placeholder.name.starts_with("[Not imported]"));
+    assert!(matches!(&placeholder.kind, solidcraft_doc::FeatureKind::ImportPlaceholder { source, source_type, detail }
+        if source == "Pad" && source_type == "PartDesign::Fillet" && !detail.is_empty()));
     assert!(session.model.state().bodies.is_empty(), "skipping an unsupported predecessor must not enable a later cut");
     let _ = std::fs::remove_dir_all(dir);
 

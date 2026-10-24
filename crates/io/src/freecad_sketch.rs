@@ -65,6 +65,34 @@ pub struct FreeCadSketchInfo {
 pub struct FreeCadWarning {
     pub summary: String,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<FreeCadIssueContext>,
+}
+
+/// Source references retained for diagnostic pictures, independent of translated constraints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeCadIssueContext {
+    pub sketch: String,
+    /// (FreeCAD geometry index, point position); -1/-2 are the sketch axes.
+    pub references: Vec<(i32, i32)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FreeCadPreviewCurve {
+    pub geometry: usize,
+    pub points: Vec<Vec2>,
+    pub construction: bool,
+    pub start: Option<Vec2>,
+    pub end: Option<Vec2>,
+    pub center: Option<Vec2>,
+}
+
+/// Bounded saved geometry for a report; never substitutes for the imported model.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FreeCadSketchPreview {
+    pub source: String,
+    pub curves: Vec<FreeCadPreviewCurve>,
+    pub omitted: usize,
 }
 
 /// One converted sketch and its source identity.
@@ -84,6 +112,7 @@ pub struct FreeCadSketch {
     pub saved_plane: Option<Plane>,
     pub attachment_unresolved: bool,
     pub source_curves: Vec<Option<String>>,
+    pub preview: FreeCadSketchPreview,
     pub sketch: Sketch,
     pub warnings: Vec<FreeCadWarning>,
 }
@@ -534,6 +563,20 @@ fn recover_plane(object: &RawObject, objects: &HashMap<&str, &RawObject>, parent
             fallback(sketch, format!("The support object `{support_name}` is missing from Document.xml."));
             return;
         };
+        // Newer saved documents can address an origin plane through its owning Origin,
+        // with the plane's object name in the subelement slot. Resolve only an actual
+        // App::Plane listed among that Origin's features; never guess from a name prefix.
+        let origin_plane = if support.type_name == "App::Origin" {
+            support
+                .children
+                .iter()
+                .find(|child| *child == sub)
+                .and_then(|child| objects.get(child.as_str()))
+                .filter(|plane| plane.type_name == "App::Plane")
+        } else {
+            None
+        };
+        let (support_name, sub, support) = origin_plane.map(|plane| (&plane.source_name, "", plane)).unwrap_or((support_name, sub.as_str(), support));
         if !sub.is_empty() || !matches!(support.type_name.as_str(), "App::Plane" | "PartDesign::Plane") {
             fallback(
                 sketch,
@@ -610,10 +653,21 @@ fn project(label: String, objects: Vec<RawObject>, file: &str) -> Result<FreeCad
     }
     let mut sketches = Vec::new();
     let mut sketch_by_name = HashMap::new();
+    let mut preview_points = 100_000usize;
+    let mut preview_count = 0usize;
     for object in &objects {
         if object_kind(&object.type_name) == Some(FreeCadNodeKind::Sketch) {
             let mut sketch = convert_sketch(object);
             recover_plane(object, &by_name, &parents, &mut sketch);
+            if !sketch.warnings.is_empty() && preview_count < 200 {
+                sketch.preview = preview(object, &mut preview_points);
+                preview_count += 1;
+            }
+            for warning in &mut sketch.warnings {
+                if warning.context.is_none() {
+                    warning.context = Some(FreeCadIssueContext { sketch: object.source_name.clone(), references: Vec::new() });
+                }
+            }
             sketch_by_name.insert(object.source_name.clone(), sketches.len());
             sketches.push(sketch);
         }
@@ -697,10 +751,69 @@ fn build_node(
 }
 
 fn warn(warnings: &mut Vec<FreeCadWarning>, summary: impl Into<String>, detail: impl Into<String>) {
-    let warning = FreeCadWarning { summary: summary.into(), detail: detail.into() };
+    let warning = FreeCadWarning { summary: summary.into(), detail: detail.into(), context: None };
     if warnings.len() < MAX_WARNINGS && !warnings.contains(&warning) {
         warnings.push(warning);
     }
+}
+
+fn warn_references(warnings: &mut Vec<FreeCadWarning>, object: &RawObject, references: Vec<(i32, i32)>, summary: String, detail: String) {
+    let before = warnings.len();
+    warn(warnings, summary, detail);
+    if warnings.len() > before
+        && let Some(warning) = warnings.last_mut()
+    {
+        warning.context = Some(FreeCadIssueContext { sketch: object.source_name.clone(), references });
+    }
+}
+
+fn preview(object: &RawObject, budget: &mut usize) -> FreeCadSketchPreview {
+    let mut curves = Vec::new();
+    for (geometry, raw) in object.geometry.iter().enumerate().take(256) {
+        if *budget < 73 {
+            break;
+        }
+        let (points, start, end, center) = match raw.data {
+            GeometryData::Line { start, end } => (vec![start, end], Some(start), Some(end), None),
+            GeometryData::Circle { center, radius } => {
+                let points = (0..=72)
+                    .map(|i| {
+                        let a = f64::from(i) * std::f64::consts::TAU / 72.0;
+                        center + Vec2::new(a.cos(), a.sin()) * radius
+                    })
+                    .collect();
+                (points, None, None, Some(center))
+            }
+            GeometryData::Arc { center, radius, start, end, angle } => {
+                let points: Vec<_> = (0..=72)
+                    .map(|i| {
+                        let a = angle + start + (end - start) * f64::from(i) / 72.0;
+                        center + Vec2::new(a.cos(), a.sin()) * radius
+                    })
+                    .collect();
+                let first = points.first().copied();
+                let last = points.last().copied();
+                (points, first, last, Some(center))
+            }
+            GeometryData::Ellipse { center, major, minor, angle } => {
+                let points = (0..=72)
+                    .map(|i| {
+                        let a = f64::from(i) * std::f64::consts::TAU / 72.0;
+                        let (x, y) = (major * a.cos(), minor * a.sin());
+                        center + Vec2::new(x * angle.cos() - y * angle.sin(), x * angle.sin() + y * angle.cos())
+                    })
+                    .collect();
+                (points, None, None, Some(center))
+            }
+            GeometryData::Unsupported => continue,
+        };
+        if points.iter().all(|p| p.x.is_finite() && p.y.is_finite() && p.x.abs() <= 1e9 && p.y.abs() <= 1e9) {
+            *budget = budget.saturating_sub(points.len());
+            curves.push(FreeCadPreviewCurve { geometry, points, construction: raw.construction, start, end, center });
+        }
+    }
+    let omitted = object.geometry.len().saturating_sub(curves.len());
+    FreeCadSketchPreview { source: object.source_name.clone(), curves, omitted }
 }
 
 fn geometry_name(type_name: &str) -> String {
@@ -782,8 +895,10 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
             }
             GeometryData::Unsupported => {
                 let name = geometry_name(&geometry.type_name);
-                warn(
+                warn_references(
                     &mut warnings,
+                    object,
+                    vec![(index as i32, 0)],
                     format!("Geometry {} is a {name}, which SolidCraft does not import yet.", index + 1),
                     format!(
                         "FreeCAD geometry {} has type `{}`. The importer currently supports line segments, circles, circular arcs and ellipses. Constraints that refer to this geometry may also be skipped.",
@@ -812,8 +927,10 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
             }
             Err(e) => {
                 sketch.points.truncate(before_points);
-                warn(
+                warn_references(
                     &mut warnings,
+                    object,
+                    vec![(index as i32, 0)],
                     format!("Geometry {} could not be imported because its values are invalid.", index + 1),
                     format!("FreeCAD geometry {} has type `{}`. SolidCraft rejected it with: {e}", index + 1, geometry.type_name),
                 );
@@ -822,6 +939,12 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
         }
     }
     for (index, constraint) in object.constraints.iter().enumerate() {
+        let references = || {
+            [(constraint.first, constraint.first_pos), (constraint.second, constraint.second_pos), (constraint.third, constraint.third_pos)]
+                .into_iter()
+                .filter(|(entity, position)| entity_description(object, *entity, *position).is_some())
+                .collect()
+        };
         if !constraint.active || constraint.virtual_space {
             continue;
         }
@@ -832,8 +955,10 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
                 c.fixed = true;
             } else {
                 let entities = constraint_entities(object, constraint);
-                warn(
+                warn_references(
                     &mut warnings,
+                    object,
+                    references(),
                     format!("Constraint {} fixes geometry that could not be imported.", index + 1),
                     format!("FreeCAD constraint {} is a Block constraint. Referenced entity: {entities}.", index + 1),
                 );
@@ -843,8 +968,10 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
         let Some(kind) = convert_constraint(constraint, &maps) else {
             let entities = constraint_entities(object, constraint);
             if constraint_name(constraint.kind).is_some() {
-                warn(
+                warn_references(
                     &mut warnings,
+                    object,
+                    references(),
                     format!("Constraint {} refers to geometry that could not be imported.", index + 1),
                     format!(
                         "FreeCAD constraint {} is {} (type {}). Referenced entities: {entities}. At least one referenced point or curve is unavailable in the imported sketch.",
@@ -854,8 +981,10 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
                     ),
                 );
             } else {
-                warn(
+                warn_references(
                     &mut warnings,
+                    object,
+                    references(),
                     format!("Constraint {} uses a FreeCAD constraint type that SolidCraft does not import yet.", index + 1),
                     format!(
                         "FreeCAD constraint {} has numeric type {}. Referenced entities: {entities}. Supported constraints include coincident, horizontal, vertical, parallel, tangent, distance, angle, perpendicular, radius, equal, point-on-object, symmetry, block and diameter.",
@@ -876,8 +1005,10 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
             }
             Err(e) => {
                 let entities = constraint_entities(object, constraint);
-                warn(
+                warn_references(
                     &mut warnings,
+                    object,
+                    references(),
                     format!("Constraint {} could not be represented in this sketch.", index + 1),
                     format!(
                         "FreeCAD constraint {} is {} (type {}). Referenced entities: {entities}. SolidCraft rejected it with: {e}",
@@ -901,6 +1032,7 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
         saved_plane: None,
         attachment_unresolved: false,
         source_curves: maps.iter().map(|map| map.curve.and_then(|index| sketch.curves.get(index)).map(|curve| curve.id.clone())).collect(),
+        preview: FreeCadSketchPreview { source: object.source_name.clone(), curves: Vec::new(), omitted: object.geometry.len() },
         sketch,
         warnings,
     }

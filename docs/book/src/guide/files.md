@@ -43,9 +43,19 @@ chamfers are skipped; their dependent operations remain suppressed. The import r
 explanations, and the most recent operation report is saved in the design properties under
 `org.solidcraft.freecad.operations`. Formulas and spreadsheet references use saved numeric values.
 
+Skipped operations also leave **[Not imported]** entries in the component's **Features** folder and
+history. These placeholders retain the original operation name and reason when the design is saved and
+reopened. Double-click a placeholder to read and copy its explanation. A placeholder creates no geometry;
+rebuild the missing operation manually before repairing its dependents.
+
 The chooser lists **Sketches** first and **Operations** second. After import, the report's **Copy** and
 **Save As…** actions export the project, source filename, result summary, and every numbered issue with
-its full **More…** explanation. Saved reports are UTF-8 text files.
+its full **More…** explanation. Saved reports use Markdown. With **Include sketch issue images when saving**
+enabled, available source sketch geometry is shown in PNGs in an adjacent images folder. Red geometry and
+numbered point markers identify the issue; missing external references are explained without guessing their
+location. Keep the Markdown file and its images folder together when sharing. Pictures show saved sketch
+coordinates, not a repaired result. Copy exports Markdown text only. This first image pass covers sketch
+issues; operation issues retain their full text explanations.
 
 Every imported file (STEP, IGES, 3MF, STL, OBJ or glTF) comes in as a new component named after the
 file, so its bodies never mix with yours. A STEP assembly keeps its structure: its parts and

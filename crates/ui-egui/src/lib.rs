@@ -485,6 +485,7 @@ pub struct SolveApp {
     pub design_properties: Option<design_properties::DesignProperties>,
     /// The selective FreeCAD sketch-import window, when open.
     pub(crate) freecad_import: Option<freecad_import::Dialog>,
+    pub(crate) freecad_operation_detail: Option<solidcraft_engine::io::FreeCadWarning>,
     /// The Bill of Materials window, when open.
     pub bom: Option<bom_panel::BomPanel>,
     material_card_review: Option<material_card_review::ReviewWindow>,
@@ -712,6 +713,7 @@ impl SolveApp {
             params: None,
             design_properties: None,
             freecad_import: None,
+            freecad_operation_detail: None,
             bom: None,
             material_card_review: None,
             menu: context_menu::MenuState::default(),
@@ -1696,6 +1698,11 @@ impl SolveApp {
         use solidcraft_engine::doc::FeatureKind;
         dialogs::cancel(self);
         let Some(f) = self.session.doc.feature(id) else { return };
+        if let FeatureKind::ImportPlaceholder { source_type, detail, .. } = &f.kind {
+            self.freecad_operation_detail =
+                Some(solidcraft_engine::io::FreeCadWarning { summary: format!("{} ({source_type})", f.name), detail: detail.clone(), context: None });
+            return;
+        }
         if matches!(f.kind, FeatureKind::Sketch { .. }) {
             self.edit_sketch(id);
             return;

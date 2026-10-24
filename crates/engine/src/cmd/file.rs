@@ -16,6 +16,9 @@ mod send;
 #[path = "file_freecad_operations.rs"]
 mod freecad_operations;
 
+#[path = "file_freecad_report.rs"]
+mod freecad_report;
+
 use serde_json::{Value, json};
 use solidcraft_doc::Document;
 use solidcraft_io::Format;
@@ -46,9 +49,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("file.import_freecad_sketches", "Import FreeCAD Sketches", import_freecad_sketches)
         .icon("import")
         .params("path: FreeCAD .FCStd file; sketches?: [source object names] (default: all); organization?: hierarchy|flat (default hierarchy: FreeCAD Parts become nested components and Bodies become sketch groups; flat: all sketches go in the active component); naming?: original|body|path (flat only, default original); preserve_planes?: bool (default true: preserve saved non-face planes and parent placements; false: every sketch uses XY); import_operations?: bool (default false); operations?: [source operation names] (default all when enabled; required base operations and profile sketches are included automatically). Pad/Pocket become Extrude new/join/cut; Revolution/Groove become Revolve new/join/cut. Fixed extents, reversed, symmetric, two-sided and through-all Pocket are supported. Unresolved attachments retain their saved plane; affected native operations and dependents are suppressed for repair. Unsupported operations are reported as skipped. Operation import requires preserve_planes:true. All additions are one undo step; operations in the reply report feature ids, status and detailed warnings."),
-    CommandSpec::new("file.freecad_import_report", "FreeCAD Import Report", freecad_operations::report)
+    CommandSpec::new("file.freecad_import_report", "FreeCAD Import Report", freecad_report::report)
         .noundo()
-        .params("report: {project, source, summary, warnings: [{summary, detail}]}; path?: destination text file. Returns the complete human-readable report text, including every More description; writes the same UTF-8 text when path is provided. Does not change the design."),
+        .params("report: {project, source, summary, warnings: [{summary, detail, context?}], previews?: [saved sketch previews]}; path?: destination Markdown file; images?: bool (default true). Returns Markdown including every More description. When saving, also writes annotated PNGs in an adjacent images folder where source geometry is available. Copy returns text without image files. Does not change the design."),
     CommandSpec::new("file.save", "Save", save)
         .icon("save")
         .key("Ctrl+S")
@@ -359,6 +362,11 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
     let mut warnings = Vec::new();
     let mut operation_sketches = std::collections::BTreeMap::new();
     for mut source in project.sketches.into_iter().filter(|sketch| selected.contains(sketch.source_name.as_str())) {
+        for warning in &mut source.warnings {
+            if warning.context.is_none() {
+                warning.context = Some(solidcraft_io::FreeCadIssueContext { sketch: source.source_name.clone(), references: Vec::new() });
+            }
+        }
         if import_operations
             && source.attachment_unresolved
             && let Some(saved) = source.saved_plane
@@ -451,6 +459,7 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
             "geometry": s.doc.sketch(id).map(|sketch| sketch.curves.len()).unwrap_or(0),
             "constraints": s.doc.sketch(id).map(|sketch| sketch.constraints.len()).unwrap_or(0),
             "warnings": source.warnings,
+            "preview": source.preview,
         }));
     }
     if imported.is_empty() && operations.is_empty() {
@@ -1236,11 +1245,57 @@ mod tests {
         assert!(text.contains(detail), "the full More text, including line breaks, is retained");
         let dir = std::env::temp_dir().join(format!("solidcraft-freecad-report-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("report.txt");
+        let path = dir.join("report.md");
         let saved = session.execute("file.freecad_import_report", &json!({"report":report,"path":path.to_string_lossy()})).unwrap();
         assert_eq!(saved["text"], copied["text"]);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         assert!(session.undo.is_empty(), "report export does not change the design");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn freecad_report_images_mark_available_entities_and_explain_missing_references() {
+        use std::io::Write;
+        let xml = r#"<Document><Objects><Object type="Sketcher::SketchObject" name="BoltHoles"/></Objects>
+          <ObjectData><Object name="BoltHoles"><Properties>
+            <Property name="Geometry"><GeometryList><Geometry type="Part::GeomCircle"><Circle CenterX="0" CenterY="12" Radius="1.875"/></Geometry></GeometryList></Property>
+            <Property name="Constraints"><ConstraintList><Constrain Type="13" First="0" FirstPos="3" Second="-3" SecondPos="0"/></ConstraintList></Property>
+          </Properties></Object></ObjectData></Document>"#;
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive.start_file("Document.xml", zip::write::SimpleFileOptions::default()).unwrap();
+        archive.write_all(xml.as_bytes()).unwrap();
+        let source = solidcraft_io::read_freecad_sketches(&archive.finish().unwrap().into_inner(), "source.FCStd").unwrap();
+        let sketch = &source.sketches[0];
+        assert_eq!(sketch.warnings[0].context.as_ref().unwrap().references, vec![(0, 3), (-3, 0)]);
+        assert_eq!(sketch.preview.curves[0].center, Some(solidcraft_geom::Vec2::new(0.0, 12.0)));
+        let report = json!({"project":"Bolt holes", "source":"source.FCStd", "summary":"A constraint was skipped.",
+            "warnings":sketch.warnings, "previews":[sketch.preview]});
+        let dir = std::env::temp_dir().join(format!("solidcraft-freecad-report-images-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Report with spaces.md");
+        let mut session = Session::default();
+        let saved = session.execute("file.freecad_import_report", &json!({"report":report,"path":path.to_string_lossy()})).unwrap();
+        let text = saved["text"].as_str().unwrap();
+        assert!(text.starts_with("# FreeCAD Import Report"));
+        assert!(text.contains("Report%20with%20spaces-images/issue-001.png"));
+        assert!(text.contains("external reference -3"));
+        assert!(text.contains("No position has been inferred"));
+        let png = std::fs::read(saved["images"][0].as_str().unwrap()).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 960);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 640);
+        let copy = session.execute("file.freecad_import_report", &json!({"report":report})).unwrap();
+        assert!(copy["images"].as_array().unwrap().is_empty(), "clipboard text must not have broken links to unwritten images");
+        assert!(copy["text"].as_str().unwrap().contains(&sketch.warnings[0].detail));
+        let disabled = session.execute("file.freecad_import_report", &json!({"report":report,"path":path.to_string_lossy(),"images":false})).unwrap();
+        assert!(disabled["images"].as_array().unwrap().is_empty());
+        // An image write failure must leave the complete text report available.
+        std::fs::write(dir.join("blocked-images"), b"not a directory").unwrap();
+        let blocked =
+            session.execute("file.freecad_import_report", &json!({"report":report,"path":dir.join("blocked.md").to_string_lossy()})).unwrap();
+        assert_eq!(blocked["image_errors"].as_array().unwrap().len(), 1);
+        assert!(std::fs::read_to_string(dir.join("blocked.md")).unwrap().contains("Image unavailable"));
+        assert!(session.undo.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1261,6 +1316,7 @@ mod tests {
             saved_plane: Some(plane),
             attachment_unresolved: false,
             source_curves: Vec::new(),
+            preview: solidcraft_io::FreeCadSketchPreview { source: "Sketch".into(), curves: Vec::new(), omitted: 0 },
             sketch: solidcraft_sketch::Sketch::new(),
             warnings: Vec::new(),
         };

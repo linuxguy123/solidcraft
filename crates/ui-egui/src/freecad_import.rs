@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use solidcraft_engine::io::{FreeCadNode, FreeCadNodeKind, FreeCadOperation, FreeCadWarning};
+use solidcraft_engine::io::{FreeCadNode, FreeCadNodeKind, FreeCadOperation, FreeCadSketchPreview, FreeCadWarning};
 
 use crate::{SolveApp, ui_kit};
 
@@ -21,6 +21,8 @@ pub(crate) struct Dialog {
     import_operations: bool,
     report: Option<(String, Vec<FreeCadWarning>)>,
     report_message: Option<(String, bool)>,
+    previews: Vec<FreeCadSketchPreview>,
+    report_images: bool,
     error: Option<String>,
 }
 
@@ -44,6 +46,8 @@ impl Dialog {
             import_operations: true,
             report: None,
             report_message: None,
+            previews: Vec::new(),
+            report_images: true,
             error: None,
         }
     }
@@ -183,6 +187,7 @@ fn import(app: &mut SolveApp, dialog: &mut Dialog) -> bool {
                 format!("Imported {count} FreeCAD sketches{suffix}.")
             };
             let mut warnings = Vec::new();
+            dialog.previews.clear();
             for item in value["imported"].as_array().into_iter().flatten().chain(operations.iter()) {
                 let name = item["name"].as_str().unwrap_or("FreeCAD item");
                 for warning in item["warnings"].as_array().into_iter().flatten() {
@@ -190,6 +195,11 @@ fn import(app: &mut SolveApp, dialog: &mut Dialog) -> bool {
                         warning.summary = format!("{name}: {}", warning.summary);
                         warnings.push(warning);
                     }
+                }
+                if item["warnings"].as_array().is_some_and(|warnings| !warnings.is_empty())
+                    && let Ok(preview) = serde_json::from_value::<FreeCadSketchPreview>(item["preview"].clone())
+                {
+                    dialog.previews.push(preview);
                 }
             }
             app.set_status(&summary, false);
@@ -203,8 +213,8 @@ fn import(app: &mut SolveApp, dialog: &mut Dialog) -> bool {
     }
 }
 
-fn show_detail(dialog: &mut Dialog, ctx: &egui::Context) {
-    let Some(warning) = dialog.detail.clone() else { return };
+fn show_detail(detail: &mut Option<FreeCadWarning>, ctx: &egui::Context) {
+    let Some(warning) = detail.clone() else { return };
     let all = format!("{}\n\n{}", warning.summary, warning.detail);
     let (closed, action) = ui_kit::Window::new(egui::Id::new("sc_freecad_import_warning"), "warning", "FreeCAD Import Details")
         .actions("", "Close", None)
@@ -221,14 +231,19 @@ fn show_detail(dialog: &mut Dialog, ctx: &egui::Context) {
             }
         });
     if closed || action == ui_kit::Action::Cancel {
-        dialog.detail = None;
+        *detail = None;
     }
 }
 
 pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
+    if app.freecad_operation_detail.is_some()
+        && let Some(dialog) = app.freecad_import.as_mut()
+    {
+        dialog.detail = None;
+    }
+    show_detail(&mut app.freecad_operation_detail, ctx);
     let Some(mut dialog) = app.freecad_import.take() else { return };
     if let Some((summary, warnings)) = dialog.report.clone() {
-        let params = json!({"report": {"project": &dialog.project, "source": &dialog.path, "summary": &summary, "warnings": &warnings}});
         let can_save = app.services.pick_save.is_some() && !app.file_picker_busy();
         let mut copy = false;
         let mut save = false;
@@ -242,7 +257,11 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     save = ui_kit::button(ui, "Save As…", ui_kit::Button::Enabled(can_save)).clicked();
                 });
                 ui_kit::text(ui, "Copy and Save As include every issue and its full More… explanation.", ui_kit::Text::Note("export_help"));
-                ui_kit::text(ui, "Repair the indicated sketch planes, profiles or targets, then enable suppressed features in dependency order. Skipped operations have no native feature.", ui_kit::Text::Note("repair_help"));
+                if !dialog.previews.is_empty() {
+                    ui_kit::checkbox(ui, "Include sketch issue images when saving", &mut dialog.report_images);
+                }
+                ui_kit::text(ui, "Save As writes Markdown with available PNG images in an adjacent folder. Keep the report and folder together. Copy includes Markdown text only.", ui_kit::Text::Note("image_help"));
+                ui_kit::text(ui, "Repair the indicated sketch planes, profiles or targets, then enable suppressed features in dependency order. Skipped operations appear as [Not imported] placeholders; double-click one for its explanation. Rebuild skipped operations manually.", ui_kit::Text::Note("repair_help"));
                 for (index, warning) in warnings.iter().enumerate() {
                     let mut numbered = warning.clone();
                     numbered.summary = format!("Issue {}: {}", index + 1, warning.summary);
@@ -252,6 +271,11 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     ui_kit::text(ui, message, ui_kit::Text::Report("report_message", *error));
                 }
             });
+        let params = if copy || save {
+            json!({"report": {"project": &dialog.project, "source": &dialog.path, "summary": &summary, "warnings": &warnings, "previews": &dialog.previews}, "images":dialog.report_images})
+        } else {
+            serde_json::Value::Null
+        };
         if copy {
             match app.run("file.freecad_import_report", params.clone()) {
                 Ok(report) => {
@@ -265,13 +289,17 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
         }
         if save {
             let stem = std::path::Path::new(&dialog.path).file_stem().and_then(|stem| stem.to_str()).unwrap_or("FreeCAD");
-            let name = format!("{stem}-import-report.txt");
-            app.pick_save(&name, &["txt"], move |app, path| {
+            let name = format!("{stem}-import-report.md");
+            app.pick_save(&name, &["md"], move |app, path| {
                 let Some(path) = path else { return };
                 let mut params = params;
                 params["path"] = json!(&path);
                 let message = match app.run("file.freecad_import_report", params) {
-                    Ok(_) => (format!("Complete report saved to {path}"), false),
+                    Ok(value) => {
+                        let images = value["images"].as_array().map_or(0, Vec::len);
+                        let errors = value["image_errors"].as_array().map_or(0, Vec::len);
+                        (format!("Report saved to {path} with {images} sketch images; {errors} images unavailable."), errors > 0)
+                    }
                     Err(error) => (error, true),
                 };
                 app.set_status(&message.0, message.1);
@@ -280,7 +308,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 }
             });
         }
-        show_detail(&mut dialog, ctx);
+        show_detail(&mut dialog.detail, ctx);
         if !closed && action != ui_kit::Action::Cancel {
             app.freecad_import = Some(dialog);
         }
@@ -364,7 +392,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 ui_kit::text(ui, error, ui_kit::Text::Report("error", true));
             }
         });
-    show_detail(&mut dialog, ctx);
+    show_detail(&mut dialog.detail, ctx);
     if closed || action == ui_kit::Action::Cancel || (action == ui_kit::Action::Ok && import(app, &mut dialog)) {
         return;
     }

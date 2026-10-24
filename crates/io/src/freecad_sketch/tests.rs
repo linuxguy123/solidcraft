@@ -177,6 +177,41 @@ fn unsupported_geometry_is_a_warning_not_a_failed_file() {
 }
 
 #[test]
+fn origin_plane_referenced_through_its_origin_is_not_a_face_attachment() {
+    let xml = r#"<Document><Objects>
+      <Object name="Body" type="PartDesign::Body"/><Object name="Origin" type="App::Origin"/>
+      <Object name="XZ_Plane004" type="App::Plane"/><Object name="Sketch" type="Sketcher::SketchObject"/>
+    </Objects><ObjectData>
+      <Object name="Body"><Properties>
+        <Property name="Group"><LinkList><Link value="Sketch"/></LinkList></Property>
+        <Property name="Origin"><Link value="Origin"/></Property>
+        <Property name="Placement"><PropertyPlacement Px="100" Py="0" Pz="5" Q0="0" Q1="0" Q2="0" Q3="1"/></Property>
+      </Properties></Object>
+      <Object name="Origin"><Properties>
+        <Property name="OriginFeatures"><LinkList><Link value="XZ_Plane004"/></LinkList></Property>
+      </Properties></Object>
+      <Object name="XZ_Plane004"><Properties>
+        <Property name="Label"><String value="XZ plane"/></Property>
+      </Properties></Object>
+      <Object name="Sketch"><Properties>
+        <Property name="MapMode"><Integer value="5"/></Property>
+        <Property name="AttachmentSupport"><LinkSubList><Link obj="Origin" sub="XZ_Plane004"/></LinkSubList></Property>
+        <Property name="Placement"><PropertyPlacement Px="0" Py="0" Pz="0" Q0="0.7071067811865475" Q1="0" Q2="0" Q3="0.7071067811865476"/></Property>
+      </Properties></Object>
+    </ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "origin-plane.FCStd").unwrap();
+    let sketch = &project.sketches[0];
+    assert!(!sketch.attachment_unresolved);
+    assert!(sketch.warnings.is_empty());
+    assert_eq!(sketch.plane_description, "Origin plane: XZ plane");
+    assert!((sketch.plane.origin - Vec3::new(100.0, 0.0, 5.0)).len() < 1e-9);
+    assert!((sketch.plane.y - Vec3::Z).len() < 1e-9);
+    let unowned = xml.replace("<Link value=\"XZ_Plane004\"/>", "<Link value=\"UnrelatedPlane\"/>");
+    let project = read_freecad_sketches(&archive(unowned.as_bytes()), "unowned-plane.FCStd").unwrap();
+    assert!(project.sketches[0].attachment_unresolved, "a named plane must actually belong to the referenced Origin");
+}
+
+#[test]
 fn planes_keep_saved_frames_parent_placements_and_report_face_fallbacks() {
     let xml = r#"<Document><Objects>
       <Object name="Part" type="App::Part"/><Object name="Body" type="PartDesign::Body"/>

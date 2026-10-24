@@ -29,8 +29,8 @@ mod native_cad;
 pub use native_cad::{NATIVE_CAD_EXTS, is_native_cad_path, native_cad_to_step};
 pub mod paper;
 pub use freecad_sketch::{
-    FreeCadAxis, FreeCadNode, FreeCadNodeKind, FreeCadOperation, FreeCadOperationSettings, FreeCadProject, FreeCadSketch, FreeCadSketchInfo,
-    FreeCadWarning, MAX_FREECAD_DOCUMENT_XML, read_freecad_sketches,
+    FreeCadAxis, FreeCadIssueContext, FreeCadNode, FreeCadNodeKind, FreeCadOperation, FreeCadOperationSettings, FreeCadPreviewCurve, FreeCadProject,
+    FreeCadSketch, FreeCadSketchInfo, FreeCadSketchPreview, FreeCadWarning, MAX_FREECAD_DOCUMENT_XML, read_freecad_sketches,
 };
 mod ply;
 pub use ply::{ply_counts, read_ply_mesh};

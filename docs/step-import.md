@@ -92,4 +92,17 @@ represented; operations without a usable profile, axis or dimensions are skipped
 Unsupported operations are never silently bypassed to enable their dependents. Numeric dimensions remain
 editable; FreeCAD expressions and spreadsheet links are not translated. All additions form one undo step.
 
+Every skipped operation leaves an **[Not imported]** placeholder in the component's Features folder and
+history, in the operation import order. It retains the source name, operation type and explanation across
+save/reopen, and never creates or changes geometry. Double-click it to open the explanation. Its report
+status remains **skipped**; dependent operations remain suppressed until repaired. Rebuild a missing
+operation manually rather than enabling its placeholder.
+
+Import reports save as Markdown, retaining every full **More…** explanation. Optional annotated PNGs show
+available saved source geometry for sketch issues, including curve highlights and numbered point markers.
+Unavailable references are described in the caption. Images are stored in an adjacent folder, which must
+be shared with the report. Copy returns Markdown text without image files. Preview data is bounded; large
+sketches can have partial previews and each export attempts at most 32 images. Image failures leave the
+text report available. Operation issue images are not included in this first pass.
+
 Only codecs for open formats are compiled in: the workspace turns off cadmpeg's default features and enables `fcstd`, `rhino` and `step` (the writer). cadmpeg's codecs for commercial CAD formats are not built, and neither is its `sat` codec, which decodes ShapeManager streams with ACIS as one dialect, so ACIS `.sat`/`.sab` files are not read yet. `crates/io/src/native_cad.rs` is the one place cadmpeg is called; a cadmpeg-based STEP reader could be added there later behind a setting, to compare with the STEP reader above without changing it.

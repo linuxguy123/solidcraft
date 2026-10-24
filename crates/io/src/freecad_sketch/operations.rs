@@ -73,7 +73,7 @@ pub(super) fn capture(object: &mut RawObject, tag: &[u8], property: &str, attrs:
 }
 
 fn issue(summary: impl Into<String>, detail: impl Into<String>) -> FreeCadWarning {
-    FreeCadWarning { summary: summary.into(), detail: detail.into() }
+    FreeCadWarning { summary: summary.into(), detail: detail.into(), context: None }
 }
 
 fn value(object: &RawObject, property: &str, default: f64) -> Option<f64> {

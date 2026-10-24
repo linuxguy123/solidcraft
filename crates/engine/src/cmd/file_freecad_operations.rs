@@ -69,42 +69,7 @@ pub(super) fn plan(operations: &[FreeCadOperation], params: &Value) -> Result<Ve
 }
 
 fn warning(summary: &str, detail: impl Into<String>) -> FreeCadWarning {
-    FreeCadWarning { summary: summary.into(), detail: detail.into() }
-}
-
-/// Copy and Save As share this formatter so neither loses the full diagnostic explanations.
-pub(super) fn report(_: &mut Session, params: &Value) -> Result<Value> {
-    #[derive(serde::Deserialize)]
-    struct Report {
-        project: String,
-        source: String,
-        summary: String,
-        warnings: Vec<FreeCadWarning>,
-    }
-    const MAX_REPORT_BYTES: usize = 4 << 20;
-    let cmd = "file.freecad_import_report";
-    let value = params.get("report").ok_or_else(|| bad(cmd, "`report` is required"))?;
-    let bytes = serde_json::to_vec(value).map_err(|error| bad(cmd, error.to_string()))?;
-    if bytes.len() > MAX_REPORT_BYTES {
-        return Err(bad(cmd, "the report exceeds 4 MB"));
-    }
-    let report: Report = serde_json::from_slice(&bytes).map_err(|error| bad(cmd, format!("invalid report: {error}")))?;
-    let mut text = format!("FreeCAD Import Report\nProject: {}\nSource: {}\n\n{}\n\n", report.project, report.source, report.summary);
-    if report.warnings.is_empty() {
-        text.push_str("No import issues were reported.\n");
-    }
-    for (index, issue) in report.warnings.iter().enumerate() {
-        text.push_str(&format!("Issue {}: {}\n{}\n\n", index + 1, issue.summary, issue.detail));
-    }
-    if text.len() > MAX_REPORT_BYTES {
-        return Err(bad(cmd, "the formatted report exceeds 4 MB"));
-    }
-    if params.get("path").is_some() {
-        let path = super::path_arg(params, cmd)?;
-        solidcraft_io::vfs::write(path, text.as_bytes()).map_err(|error| crate::EngineError::Other(format!("{path}: {error}")))?;
-        return Ok(json!({"text": text, "path": path}));
-    }
-    Ok(json!({"text": text}))
+    FreeCadWarning { summary: summary.into(), detail: detail.into(), context: None }
 }
 
 fn axis(s: &Session, sketch: &ImportedSketch, source: &FreeCadAxis) -> std::result::Result<(AxisRef, Vec3, Vec3), String> {
@@ -236,7 +201,7 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
             blockers.push(warning(
                 "An earlier operation needs repair.",
                 format!(
-                    "This operation depends on `{}`. Repair and enable its preceding operation before enabling this one.",
+                    "This operation depends on `{}`. Resolve its missing or suppressed predecessor before enabling this one. A [Not imported] placeholder records a missing operation that must be rebuilt manually.",
                     op.base.as_deref().unwrap_or_default()
                 ),
             ));
@@ -329,10 +294,37 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                 ),
             ));
         }
-        outcome.blocked = !blockers.is_empty() || feature_id.is_none();
+        let skipped = feature_id.is_none();
+        outcome.blocked = !blockers.is_empty() || skipped;
         warnings.extend(blockers);
+        if skipped {
+            let mut detail = format!(
+                "Source operation: {} ({})\n\nThis placeholder records a missing operation. It creates no geometry and cannot be enabled to recreate the original operation. Rebuild that operation manually before repairing its dependents.\n\n",
+                op.label, op.source_name
+            );
+            for issue in &warnings {
+                detail.push_str(&format!("{}\n{}\n\n", issue.summary, issue.detail));
+            }
+            let component = op
+                .body
+                .as_ref()
+                .and_then(|(body, _)| sketches.values().find(|sketch| sketch.body.as_ref().is_some_and(|(source, _)| source == body)))
+                .or_else(|| sketches.get(&op.profile))
+                .map(|sketch| sketch.component)
+                .unwrap_or(s.active_component);
+            let name = super::freecad_feature_name(s, &format!("[Not imported] {}", op.label));
+            let id = s.doc_mut().add_feature(
+                FeatureKind::ImportPlaceholder { source: op.source_name.clone(), source_type: op.type_name.clone(), detail },
+                Some(&name),
+            )?;
+            if let Some(feature) = s.doc_mut().feature_mut(id) {
+                feature.component = component;
+            }
+            feature_id = Some(id);
+            s.refresh();
+        }
         reports.push(json!({"source": op.source_name, "name": op.label, "type": op.type_name, "feature": feature_id,
-            "status": if feature_id.is_none() { "skipped" } else if outcome.blocked { "needs_repair" } else { "imported" }, "warnings": warnings}));
+            "status": if skipped { "skipped" } else if outcome.blocked { "needs_repair" } else { "imported" }, "warnings": warnings}));
         outcomes.insert(op.source_name.clone(), outcome);
         used_bodies.extend(s.model.state().bodies.iter().map(|body| body.name.clone()));
     }
