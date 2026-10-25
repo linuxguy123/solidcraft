@@ -156,6 +156,7 @@ struct RawObject {
     map_mode: i32,
     values: BTreeMap<String, String>,
     links: BTreeMap<String, (String, Vec<String>)>,
+    pattern_originals: Vec<String>,
     expressions: bool,
 }
 
@@ -168,6 +169,9 @@ struct RawGeometry {
 
 #[derive(Clone, Debug, Default)]
 enum GeometryData {
+    Point {
+        position: Vec2,
+    },
     Line {
         start: Vec2,
         end: Vec2,
@@ -418,6 +422,11 @@ fn apply_empty(e: &BytesStart<'_>, property: &str, current: Option<&mut RawObjec
                 }
             }
         }
+        b"GeomPoint" => {
+            if let Some(g) = geometry {
+                g.data = GeometryData::Point { position: Vec2::new(number(&a, "X"), number(&a, "Y")) };
+            }
+        }
         b"LineSegment" => {
             if let Some(g) = geometry {
                 g.data = GeometryData::Line {
@@ -597,6 +606,17 @@ fn recover_plane(object: &RawObject, objects: &HashMap<&str, &RawObject>, parent
         };
         let (support_name, sub, support) = origin_plane.map(|plane| (&plane.source_name, "", plane)).unwrap_or((support_name, sub.as_str(), support));
         if !sub.is_empty() || !matches!(support.type_name.as_str(), "App::Plane" | "PartDesign::Plane") {
+            if support.type_name == "App::Origin"
+                && matches!(object.placement, Some(Some(_)))
+                && let Some(saved) = sketch.saved_plane
+            {
+                // A stale Origin subelement does not invalidate the sketch's
+                // resolved placement. Keep its static plane without claiming a
+                // live attachment to a different Origin feature.
+                sketch.plane = saved;
+                sketch.plane_description = "Saved sketch plane (source Origin link unavailable)".into();
+                return;
+            }
             if support.type_name != "App::Origin"
                 && matches!(object.placement, Some(Some(_)))
                 && let Some(saved) = sketch.saved_plane
@@ -818,10 +838,12 @@ fn warn_references(warnings: &mut Vec<FreeCadWarning>, object: &RawObject, refer
 fn preview(object: &RawObject, budget: &mut usize) -> FreeCadSketchPreview {
     let mut curves = Vec::new();
     for (geometry, raw) in object.geometry.iter().enumerate().take(256) {
-        if *budget < 73 {
+        let needed = if matches!(raw.data, GeometryData::Point { .. }) { 1 } else { 73 };
+        if *budget < needed {
             break;
         }
         let (points, start, end, center) = match raw.data {
+            GeometryData::Point { position } => (vec![position], Some(position), None, None),
             GeometryData::Line { start, end } => (vec![start, end], Some(start), Some(end), None),
             GeometryData::Circle { center, radius } => {
                 let points = (0..=72)
@@ -866,6 +888,7 @@ fn preview(object: &RawObject, budget: &mut usize) -> FreeCadSketchPreview {
 
 fn geometry_name(type_name: &str) -> String {
     match type_name {
+        "Part::GeomPoint" => "point".into(),
         "Part::GeomLineSegment" => "line segment".into(),
         "Part::GeomCircle" => "circle".into(),
         "Part::GeomArcOfCircle" => "circular arc".into(),
@@ -925,7 +948,24 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
     let mut maps = Vec::with_capacity(object.geometry.len());
     for (index, geometry) in object.geometry.iter().enumerate() {
         let before_points = sketch.points.len();
+        if let GeometryData::Point { position } = geometry.data {
+            match sketch.add_point(position, None) {
+                Ok(point) => maps.push(GeometryMap { start: Some(point), ..GeometryMap::default() }),
+                Err(e) => {
+                    warn_references(
+                        &mut warnings,
+                        object,
+                        vec![(index as i32, 0)],
+                        format!("Geometry {} could not be imported because its values are invalid.", index + 1),
+                        format!("FreeCAD geometry {} has type `{}`. SolidCraft rejected it with: {e}", index + 1, geometry.type_name),
+                    );
+                    maps.push(GeometryMap::default());
+                }
+            }
+            continue;
+        }
         let result = match geometry.data {
+            GeometryData::Point { .. } => continue,
             GeometryData::Line { start, end } => sketch.add_line(start, end, None, None, None),
             GeometryData::Circle { center, radius } => sketch.add_circle(center, radius, None, None),
             GeometryData::Arc { center, radius, start, end, angle } => {
@@ -949,7 +989,7 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
                     vec![(index as i32, 0)],
                     format!("Geometry {} is a {name}, which SolidCraft does not import yet.", index + 1),
                     format!(
-                        "FreeCAD geometry {} has type `{}`. The importer currently supports line segments, circles, circular arcs and ellipses. Constraints that refer to this geometry may also be skipped.",
+                        "FreeCAD geometry {} has type `{}`. The importer currently supports points, line segments, circles, circular arcs and ellipses. Constraints that refer to this geometry may also be skipped.",
                         index + 1,
                         geometry.type_name
                     ),
@@ -1166,7 +1206,7 @@ fn convert_constraint(c: &RawConstraint, maps: &[GeometryMap], sketch: &mut Sket
         13 if c.second == -1 && c.second_pos == 0 => ConstraintKind::HorizontalPoints { p: 0, q: first_point()? },
         13 if c.second == -2 && c.second_pos == 0 => ConstraintKind::VerticalPoints { p: 0, q: first_point()? },
         13 => ConstraintKind::PointOnCurve { p: first_point()?, c: second_curve()? },
-        14 if c.third_pos == 1 => {
+        14 if c.third_pos != 0 => {
             let (p, q, center) = (first_point()?, second_point()?, point_ref(maps, c.third, c.third_pos)?);
             if p == q || p == center || q == center {
                 return None;

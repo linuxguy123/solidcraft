@@ -169,6 +169,36 @@ fn symmetry_about_the_sketch_origin_keeps_circle_centers_opposite() {
 }
 
 #[test]
+fn symmetry_about_another_circles_center_keeps_both_centers_opposite() {
+    let xml = r#"<Document><Objects><Object name="Sketch013" type="Sketcher::SketchObject"/></Objects>
+      <ObjectData><Object name="Sketch013"><Properties>
+        <Property name="Geometry"><GeometryList>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="0" CenterY="0" Radius="7.5"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="5" CenterY="5" Radius="2.5"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="-5" CenterY="-5" Radius="2.5"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="15.5563491861040468" CenterY="-15.5563491861040468" Radius="2.5"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="-15.5563491861040468" CenterY="15.5563491861040468" Radius="2.5"/></Geometry>
+        </GeometryList></Property>
+        <Property name="Constraints"><ConstraintList>
+          <Constrain Type="1" First="0" FirstPos="3" Second="-1" SecondPos="1"/>
+          <Constrain Type="14" First="3" FirstPos="3" Second="4" SecondPos="3" Third="0" ThirdPos="3"/>
+        </ConstraintList></Property>
+      </Properties></Object></ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "circle-center-symmetry.FCStd").unwrap();
+    let source = &project.sketches[0];
+    assert!(source.warnings.is_empty(), "a circle center is a valid symmetry point: {:?}", source.warnings);
+    assert_eq!(source.source_curves.len(), 5);
+    assert_eq!(source.sketch.curves.len(), 6, "the symmetry helper is a construction line");
+    let CurveKind::Circle { c: center, .. } = source.sketch.curves[0].kind else { panic!("expected center circle") };
+    let CurveKind::Circle { c: first, .. } = source.sketch.curves[3].kind else { panic!("expected first circle") };
+    let CurveKind::Circle { c: second, .. } = source.sketch.curves[4].kind else { panic!("expected second circle") };
+    let ConstraintKind::Midpoint { p, l } = source.sketch.constraints[1].kind else { panic!("expected midpoint symmetry") };
+    assert_eq!(p, center);
+    assert!(source.sketch.curves[l].construction);
+    assert!(matches!(source.sketch.curves[l].kind, CurveKind::Line { a, b } if a == first && b == second));
+}
+
+#[test]
 fn basic_operations_retain_profiles_dependencies_dimensions_and_axes() {
     let xml = include_str!("operations_fixture.xml");
     let project = read_freecad_sketches(&archive(xml.as_bytes()), "operations.FCStd").unwrap();
@@ -193,6 +223,67 @@ fn basic_operations_retain_profiles_dependencies_dimensions_and_axes() {
 }
 
 #[test]
+fn mirror_and_circular_pattern_retain_their_saved_sources_and_axes() {
+    let xml = r#"<Document><Objects>
+      <Object name="Body" type="PartDesign::Body"/>
+      <Object name="Sketch" type="Sketcher::SketchObject"/>
+      <Object name="YZ_Plane" type="App::Plane"/>
+      <Object name="Pad" type="PartDesign::Pad"/>
+      <Object name="Mirrored" type="PartDesign::Mirrored"/>
+      <Object name="Mirrored001" type="PartDesign::Mirrored"/>
+      <Object name="PolarPattern" type="PartDesign::PolarPattern"/>
+    </Objects><ObjectData>
+      <Object name="Body"><Properties><Property name="AllowCompound"><Bool value="true"/></Property><Property name="Group"><LinkList>
+        <Link value="Sketch"/><Link value="Pad"/><Link value="Mirrored"/><Link value="Mirrored001"/><Link value="PolarPattern"/>
+      </LinkList></Property></Properties></Object>
+      <Object name="Sketch"><Properties><Property name="Geometry"><GeometryList>
+        <Geometry type="Part::GeomCircle"><Circle CenterX="10" CenterY="0" Radius="2"/></Geometry>
+      </GeometryList></Property>
+      <Property name="Placement"><PropertyPlacement Px="0" Py="0" Pz="0" Q0="0" Q1="0" Q2="0" Q3="1"/></Property>
+      </Properties></Object>
+      <Object name="YZ_Plane"><Properties><Property name="Placement">
+        <PropertyPlacement Px="0" Py="0" Pz="0" Q0="0.5" Q1="0.5" Q2="0.5" Q3="0.5"/>
+      </Property></Properties></Object>
+      <Object name="Pad"><Properties>
+        <Property name="Profile"><LinkSub value="Sketch"/></Property>
+        <Property name="Length"><Float value="5"/></Property>
+      </Properties></Object>
+      <Object name="Mirrored"><Properties>
+        <Property name="BaseFeature"><Link value="Pad"/></Property>
+        <Property name="Originals"><LinkList><Link value="Pad"/></LinkList></Property>
+        <Property name="MirrorPlane"><LinkSub value="YZ_Plane"/></Property>
+        <Property name="TransformMode"><Integer value="1"/></Property>
+      </Properties></Object>
+      <Object name="Mirrored001"><Properties>
+        <Property name="BaseFeature"><Link value="Pad"/></Property>
+        <Property name="Originals"><LinkList><Link value="Pad"/></LinkList></Property>
+        <Property name="MirrorPlane"><LinkSub value="Sketch"><Sub value="V_Axis"/></LinkSub></Property>
+        <Property name="TransformMode"><Integer value="0"/></Property>
+      </Properties></Object>
+      <Object name="PolarPattern"><Properties>
+        <Property name="BaseFeature"><Link value="Mirrored"/></Property>
+        <Property name="Originals"><LinkList><Link value="Mirrored"/></LinkList></Property>
+        <Property name="Axis"><LinkSub value="Sketch"><Sub value="N_Axis"/></LinkSub></Property>
+        <Property name="Occurrences"><Integer value="4"/></Property>
+        <Property name="Angle"><Float value="360"/></Property>
+        <Property name="Mode"><Integer value="0"/></Property>
+      </Properties></Object>
+    </ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "transforms.FCStd").unwrap();
+    assert_eq!(project.operations.len(), 4);
+    let mirror = project.operations.iter().find(|operation| operation.source_name == "Mirrored").unwrap();
+    assert!(mirror.blockers.is_empty(), "saved mirror plane is available: {:?}", mirror.blockers);
+    assert!(mirror.body_allows_compound);
+    assert!(matches!(mirror.settings, Some(FreeCadOperationSettings::Mirror { ref original, whole_body: true, .. }) if original == "Pad"));
+    let sketch_axis_mirror = project.operations.iter().find(|operation| operation.source_name == "Mirrored001").unwrap();
+    assert!(sketch_axis_mirror.blockers.is_empty());
+    assert!(matches!(sketch_axis_mirror.settings, Some(FreeCadOperationSettings::Mirror { plane, whole_body: false, .. }) if plane.normal().dot(Vec3::X) > 1.0 - 1e-9));
+    let pattern = project.operations.iter().find(|operation| operation.source_name == "PolarPattern").unwrap();
+    assert!(pattern.blockers.is_empty(), "saved pattern axis is available: {:?}", pattern.blockers);
+    assert!(matches!(pattern.settings, Some(FreeCadOperationSettings::PolarPattern { count: 4, angle, ref original, .. }) if angle == 360.0 && original == "Mirrored"));
+}
+
+#[test]
 fn negative_one_sided_extrusion_lengths_reverse_the_saved_direction() {
     let xml = include_str!("operations_fixture.xml")
         .replace("<Property name=\"Length\"><Float value=\"10\"/></Property>", "<Property name=\"Length\"><Float value=\"-10\"/></Property>")
@@ -204,6 +295,90 @@ fn negative_one_sided_extrusion_lengths_reverse_the_saved_direction() {
     let pocket = project.operations.iter().find(|op| op.source_name == "Pocket").unwrap();
     assert!(pocket.blockers.is_empty(), "the negative pocket length is a valid saved FreeCAD extent");
     assert!(matches!(pocket.settings, Some(FreeCadOperationSettings::Extrude { length: 4.0, reversed: true, cut: true, .. })));
+}
+
+#[test]
+fn skipped_fillets_report_the_saved_radius_and_source_selection() {
+    let xml = r#"<Document><Objects>
+      <Object name="Pad" type="PartDesign::Pad"/>
+      <Object name="FilletEdges" type="PartDesign::Fillet"/>
+      <Object name="FilletFaces" type="PartDesign::Fillet"/>
+      <Object name="FilletAll" type="PartDesign::Fillet"/>
+    </Objects><ObjectData>
+      <Object name="Pad"><Properties><Property name="Label"><String value="Support Pad"/></Property></Properties></Object>
+      <Object name="FilletEdges"><Properties>
+        <Property name="Radius"><Float value="2"/></Property>
+        <Property name="Base"><LinkSub value="Pad" count="3"><Sub value="Edge20"/><Sub value="Edge25"/><Sub value="Edge12"/></LinkSub></Property>
+      </Properties></Object>
+      <Object name="FilletFaces"><Properties>
+        <Property name="Radius"><Float value="1.5"/></Property>
+        <Property name="Base"><LinkSub value="Pad" count="2"><Sub value="Face2"/><Sub value="Face12"/></LinkSub></Property>
+      </Properties></Object>
+      <Object name="FilletAll"><Properties>
+        <Property name="Radius"><Float value="3"/></Property>
+        <Property name="Base"><LinkSub value="Pad" count="0"/></Property>
+        <Property name="UseAllEdges"><Bool value="true"/></Property>
+      </Properties></Object>
+    </ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "fillet-selection.FCStd").unwrap();
+    let detail = |name: &str| project.operations.iter().find(|op| op.source_name == name).unwrap().blockers[0].detail.clone();
+    let edges = detail("FilletEdges");
+    assert!(edges.contains("Saved fillet radius: 2 mm") && edges.contains("`Support Pad` (`Pad`)"));
+    assert!(edges.contains("Selected FreeCAD edges: `Edge20`, `Edge25`, `Edge12`"));
+    let faces = detail("FilletFaces");
+    assert!(faces.contains("Saved fillet radius: 1.5 mm") && faces.contains("Selected FreeCAD faces: `Face2`, `Face12`"));
+    assert!(faces.contains("does not provide a separate edge list"));
+    let all = detail("FilletAll");
+    assert!(all.contains("Saved fillet radius: 3 mm") && all.contains("all edges of that base operation"));
+}
+
+#[test]
+fn skipped_polar_patterns_report_occurrences_angle_axis_and_sources() {
+    let xml = r#"<Document><Objects>
+      <Object name="Sketch" type="Sketcher::SketchObject"/>
+      <Object name="Pad" type="PartDesign::Pad"/>
+      <Object name="Pocket" type="PartDesign::Pocket"/>
+      <Object name="PatternExtent" type="PartDesign::PolarPattern"/>
+      <Object name="PatternSpacing" type="PartDesign::PolarPattern"/>
+    </Objects><ObjectData>
+      <Object name="Sketch"><Properties><Property name="Label"><String value="Hole layout"/></Property></Properties></Object>
+      <Object name="Pad"><Properties><Property name="Label"><String value="Boss"/></Property></Properties></Object>
+      <Object name="Pocket"><Properties><Property name="Label"><String value="Bolt holes"/></Property></Properties></Object>
+      <Object name="PatternExtent"><Properties>
+        <Property name="Occurrences"><Integer value="10"/></Property>
+        <Property name="Angle"><Float value="360"/></Property>
+        <Property name="Mode"><Integer value="0"/></Property>
+        <Property name="Axis"><LinkSub value="Sketch"><Sub value="N_Axis"/></LinkSub></Property>
+        <Property name="Originals"><LinkList><Link value="Pad"/><Link value="Pocket"/></LinkList></Property>
+        <Property name="Reversed"><Bool value="false"/></Property>
+        <Property name="TransformMode"><Integer value="0"/></Property>
+      </Properties></Object>
+      <Object name="PatternSpacing"><Properties>
+        <Property name="Occurrences"><Integer value="5"/></Property>
+        <Property name="Angle"><Float value="360"/></Property>
+        <Property name="Offset"><Float value="45"/></Property>
+        <Property name="Mode"><Integer value="1"/></Property>
+        <Property name="Axis"><LinkSub value="Sketch"><Sub value="V_Axis"/></LinkSub></Property>
+        <Property name="Originals"><LinkList><Link value="Pocket"/></LinkList></Property>
+        <Property name="Reversed"><Bool value="true"/></Property>
+        <Property name="TransformMode"><Integer value="1"/></Property>
+      </Properties></Object>
+    </ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "polar-patterns.FCStd").unwrap();
+    let detail = |name: &str| project.operations.iter().find(|op| op.source_name == name).unwrap().blockers[0].detail.clone();
+    let extent = detail("PatternExtent");
+    assert!(extent.contains("Saved occurrence count: 10, including the original feature"));
+    assert!(extent.contains("Total pattern angle: 360° (overall angle mode)"));
+    assert!(extent.contains("Nominal angular step: 36°"));
+    assert!(extent.contains("normal (Z) axis of `Hole layout` (`Sketch`)"));
+    assert!(extent.contains("`Boss` (`Pad`), `Bolt holes` (`Pocket`)"));
+    assert!(extent.contains("Transform mode: selected features"));
+    let spacing = detail("PatternSpacing");
+    assert!(spacing.contains("Saved occurrence count: 5"));
+    assert!(spacing.contains("Saved offset angle: 45°"));
+    assert!(!spacing.contains("Total pattern angle: 360°"), "the inactive saved Angle must not be called the actual span");
+    assert!(spacing.contains("vertical (Y) axis of `Hole layout` (`Sketch`)"));
+    assert!(spacing.contains("Direction: reversed") && spacing.contains("Transform mode: whole base shape"));
 }
 
 #[test]
@@ -259,7 +434,72 @@ fn unsupported_geometry_is_a_warning_not_a_failed_file() {
     assert!(loose.sketch.curves.is_empty());
     let warning = loose.warnings.iter().find(|w| w.detail.contains("GeomBSplineCurve")).unwrap();
     assert!(warning.summary.contains("B-spline curve"));
-    assert!(warning.detail.contains("line segments, circles, circular arcs and ellipses"));
+    assert!(warning.detail.contains("points, line segments, circles, circular arcs and ellipses"));
+}
+
+#[test]
+fn freecad_point_geometry_keeps_its_constraints_without_changing_the_profile() {
+    let xml = r#"<Document><Objects>
+      <Object name="Body" type="PartDesign::Body"/>
+      <Object name="Sketch009" type="Sketcher::SketchObject"/>
+      <Object name="Pad006" type="PartDesign::Pad"/>
+    </Objects><ObjectData>
+      <Object name="Body"><Properties><Property name="Group"><LinkList>
+        <Link value="Sketch009"/><Link value="Pad006"/>
+      </LinkList></Property></Properties></Object>
+      <Object name="Sketch009"><Properties>
+        <Property name="Label"><String value="Sketch010"/></Property>
+        <Property name="Geometry"><GeometryList>
+          <Geometry type="Part::GeomLineSegment"><LineSegment StartX="0" StartY="0" EndX="30.4" EndY="0"/></Geometry>
+          <Geometry type="Part::GeomLineSegment"><LineSegment StartX="30.4" StartY="0" EndX="30.4" EndY="20"/></Geometry>
+          <Geometry type="Part::GeomLineSegment"><LineSegment StartX="30.4" StartY="20" EndX="0" EndY="20"/></Geometry>
+          <Geometry type="Part::GeomLineSegment"><LineSegment StartX="0" StartY="20" EndX="0" EndY="0"/></Geometry>
+          <Geometry type="Part::GeomPoint"><GeomPoint X="5" Y="0" Z="0"/><Construction value="0"/></Geometry>
+          <Geometry type="Part::GeomLineSegment"><LineSegment StartX="5" StartY="-10" EndX="5" EndY="0"/><Construction value="1"/></Geometry>
+        </GeometryList></Property>
+        <Property name="Constraints"><ConstraintList>
+          <Constrain Type="13" First="4" FirstPos="1" Second="0" SecondPos="0"/>
+          <Constrain Type="1" First="5" FirstPos="2" Second="4" SecondPos="1"/>
+          <Constrain Type="6" Value="25.4" First="0" FirstPos="2" Second="4" SecondPos="1"/>
+        </ConstraintList></Property>
+      </Properties></Object>
+      <Object name="Pad006"><Properties>
+        <Property name="Profile"><LinkSub value="Sketch009"/></Property>
+        <Property name="Length"><Float value="10"/></Property>
+        <Property name="Type"><Integer value="0"/></Property>
+      </Properties></Object>
+    </ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "point-profile.FCStd").unwrap();
+    let source = &project.sketches[0];
+    assert!(source.warnings.is_empty(), "point and its constraints import: {:?}", source.warnings);
+    assert_eq!(source.sketch.curves.len(), 5, "the point must not become a profile curve");
+    assert_eq!(source.source_curves.len(), 6);
+    assert!(source.source_curves[4].is_none());
+    assert_eq!(source.sketch.constraints.len(), 3);
+    let point = match source.sketch.constraints[0].kind {
+        ConstraintKind::PointOnCurve { p, c: 0 } => p,
+        ref kind => panic!("expected point on profile edge, got {kind:?}"),
+    };
+    assert_eq!(source.sketch.point(point), Some(Vec2::new(5.0, 0.0)));
+    assert!(matches!(source.sketch.constraints[1].kind, ConstraintKind::Coincident { q, .. } if q == point));
+    assert!(matches!(source.sketch.constraints[2].kind, ConstraintKind::Distance { q, value, .. } if q == point && value == 25.4));
+    assert!(project.operations[0].blockers.is_empty(), "the pad remains importable");
+}
+
+#[test]
+fn freecad_point_is_locatable_in_issue_previews() {
+    let source = RawObject {
+        geometry: vec![RawGeometry {
+            type_name: "Part::GeomPoint".into(),
+            construction: false,
+            data: GeometryData::Point { position: Vec2::new(5.0, 0.0) },
+        }],
+        ..RawObject::default()
+    };
+    let picture = preview(&source, &mut 1);
+    assert_eq!(picture.omitted, 0);
+    assert_eq!(picture.curves[0].start, Some(Vec2::new(5.0, 0.0)));
+    assert_eq!(picture.curves[0].points, [Vec2::new(5.0, 0.0)]);
 }
 
 #[test]
@@ -303,7 +543,17 @@ fn origin_plane_referenced_through_its_origin_is_not_a_face_attachment() {
     assert_eq!(project.sketches[0].plane_description, "Origin plane: XZ plane");
     let missing = xml.replace("sub=\"XZ_Plane004\"", "sub=\"MissingPlane\"");
     let project = read_freecad_sketches(&archive(missing.as_bytes()), "missing-plane.FCStd").unwrap();
-    assert!(project.sketches[0].attachment_unresolved, "a missing plane cannot be inferred from its name");
+    assert!(!project.sketches[0].attachment_unresolved, "a stale Origin link does not invalidate a saved sketch plane");
+    assert!(project.sketches[0].warnings.is_empty());
+    assert_eq!(project.sketches[0].plane_description, "Saved sketch plane (source Origin link unavailable)");
+    assert_eq!(project.sketches[0].plane, sketch.plane);
+    assert!(project.sketches[0].datum.is_none(), "a missing source plane must not be silently linked to another Origin feature");
+    let no_placement = missing.replace(
+        "<Property name=\"Placement\"><PropertyPlacement Px=\"0\" Py=\"0\" Pz=\"0\" Q0=\"0.7071067811865475\" Q1=\"0\" Q2=\"0\" Q3=\"0.7071067811865476\"/></Property>",
+        "",
+    );
+    let project = read_freecad_sketches(&archive(no_placement.as_bytes()), "missing-plane-and-placement.FCStd").unwrap();
+    assert!(project.sketches[0].attachment_unresolved, "without the source plane or a saved placement, the attachment needs repair");
     let detached = xml.replace("<Link obj=\"Origin\" sub=\"XZ_Plane004\"/>", "");
     let project = read_freecad_sketches(&archive(detached.as_bytes()), "detached-plane.FCStd").unwrap();
     assert!(!project.sketches[0].attachment_unresolved, "an empty support list leaves the saved sketch plane usable");

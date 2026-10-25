@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Value, json};
-use solidcraft_doc::{AxisRef, BodyName, Direction, Extent, ExtrudeConvention, FeatureKind, Operation, RevolveConvention, SketchId};
+use solidcraft_doc::{AxisRef, BodyName, Dir, Direction, Extent, ExtrudeConvention, FeatureKind, FeatureName, Operation, PatternKind, PlaneRef, Position, RevolveConvention, SketchId};
 use solidcraft_geom::{Vec2, Vec3};
 use solidcraft_io::{FreeCadAxis, FreeCadOperation, FreeCadOperationSettings, FreeCadWarning, FreeCadWarningSeverity};
 
@@ -170,6 +170,9 @@ fn kind(
                 to: None,
             }
         }
+        FreeCadOperationSettings::Mirror { .. } | FreeCadOperationSettings::PolarPattern { .. } => {
+            return Err("A transformed operation has no profile sketch.".into());
+        }
     };
     super::super::features::stable_profiles(s, &mut feature).map_err(|error| error.to_string())?;
     Ok(feature)
@@ -179,6 +182,7 @@ fn kind(
 struct Outcome {
     bodies: Vec<String>,
     blocked: bool,
+    source_feature: Option<String>,
 }
 
 fn reserve_body_name(used: &mut BTreeSet<String>, base: &str) -> String {
@@ -209,8 +213,11 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
     for op in operations {
         let parent = op.base.as_ref().and_then(|base| outcomes.get(base)).cloned();
         let mut outcome = parent.clone().unwrap_or_default();
+        outcome.source_feature = None;
         if let Some((source, _)) = &op.body
             && let Some(name) = source_bodies.get(source)
+            && (outcome.bodies.is_empty()
+                || !op.base.as_deref().and_then(|base| by_name.get(base)).is_some_and(|base| base.body.as_ref().map(|(name, _)| name) == Some(source)))
         {
             outcome.bodies = vec![name.clone()];
         }
@@ -234,7 +241,88 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
             ));
         }
         let mut feature_id = None;
-        if let (Some(settings), Some(sketch)) = (&op.settings, sketches.get(&op.profile)) {
+        if let Some(settings @ (FreeCadOperationSettings::Mirror { .. } | FreeCadOperationSettings::PolarPattern { .. })) = &op.settings {
+            let original = match settings {
+                FreeCadOperationSettings::Mirror { original, .. } | FreeCadOperationSettings::PolarPattern { original, .. } => original,
+                _ => &op.source_name,
+            };
+            let source = outcomes
+                .get(original)
+                .and_then(|outcome| outcome.source_feature.as_deref())
+                .and_then(|name| s.doc.find_feature(name))
+                .map(|feature| (feature.name.clone(), feature.component));
+            if let Some((source_name, component)) = source {
+                let source_is_first_pad = by_name.get(original.as_str()).is_some_and(|source| {
+                    source.base.is_none() && matches!(source.settings, Some(FreeCadOperationSettings::Extrude { cut: false, .. }))
+                });
+                let mirror_body = matches!(settings, FreeCadOperationSettings::Mirror { whole_body: true, .. })
+                    || matches!(settings, FreeCadOperationSettings::Mirror { .. }) && source_is_first_pad;
+                let body = outcome.bodies.first().filter(|name| s.model.state().body(name).is_some()).cloned();
+                let body_missing = mirror_body && body.is_none();
+                let kind = match settings {
+                    FreeCadOperationSettings::Mirror { plane, .. } => {
+                        if body_missing {
+                            blockers.push(warning("The mirror's source body is unavailable.", "The preceding operation did not create the body to mirror. Repair that operation before rebuilding this mirror."));
+                        }
+                        Some(FeatureKind::Mirror {
+                            features: if mirror_body { Vec::new() } else { vec![FeatureName(source_name.clone())] },
+                            plane: PlaneRef::Custom { plane: *plane },
+                            bodies: if mirror_body { body.into_iter().map(BodyName).collect() } else { Vec::new() },
+                            combine: mirror_body,
+                            placements: Vec::new(),
+                        })
+                    }
+                    FreeCadOperationSettings::PolarPattern { origin, axis, count, angle, reversed, .. } => Some(FeatureKind::Pattern {
+                        features: vec![FeatureName(source_name.clone())],
+                        pattern: PatternKind::Circular {
+                            origin: Position(*origin),
+                            axis: Dir(*axis),
+                            count: count.to_string().into(),
+                            angle: format!("{angle} deg").into(),
+                            alignment: solidcraft_sketch::PatternAlignment::Right,
+                            reversed: *reversed,
+                            axis_feature: None,
+                        },
+                        bodies: Vec::new(),
+                    }),
+                    _ => None,
+                };
+                if let Some(kind) = kind.filter(|_| !body_missing) {
+                    let label = if blockers.is_empty() { op.label.clone() } else { format!("{} [Needs repair]", op.label) };
+                    let name = super::freecad_feature_name(s, &label);
+                    let before: BTreeSet<String> = s.model.state().bodies.iter().map(|body| body.name.clone()).collect();
+                    let id = s.doc_mut().add_feature(kind, Some(&name))?;
+                    if let Some(feature) = s.doc_mut().feature_mut(id) {
+                        feature.component = component;
+                        feature.suppressed = !blockers.is_empty();
+                    }
+                    s.refresh();
+                    if blockers.is_empty() {
+                        let created: Vec<String> = s.model.state().bodies.iter().filter(|body| !before.contains(&body.name)).map(|body| body.name.clone()).collect();
+                        let error = s.model.result(id).and_then(|result| result.error.clone())
+                            .or_else(|| s.model.result(id).is_none().then(|| "The imported transform has no evaluation result.".into()))
+                            .or_else(|| (!op.body_allows_compound && !created.is_empty())
+                                .then(|| "The transform created separate solids, but the source FreeCAD Body does not permit a compound result.".into()));
+                        if let Some(error) = error {
+                            blockers.push(warning("SolidCraft could not rebuild this operation; it was imported suppressed.", error));
+                            if let Some(feature) = s.doc_mut().feature_mut(id) {
+                                feature.suppressed = true;
+                                feature.name.push_str(" [Needs repair]");
+                            }
+                            s.refresh();
+                        } else {
+                            outcome.bodies.extend(created);
+                        }
+                    }
+                    feature_id = Some(id);
+                }
+            } else {
+                blockers.push(warning(
+                    "The transformed source feature is unavailable.",
+                    format!("FreeCAD source operation `{original}` could not be rebuilt as an active SolidCraft feature. Rebuild it before this mirror or circular pattern."),
+                ));
+            }
+        } else if let (Some(settings), Some(sketch)) = (&op.settings, sketches.get(&op.profile)) {
             if op.body.as_ref().map(|(name, _)| name) != sketch.body.as_ref().map(|(name, _)| name) {
                 blockers.push(warning(
                     "The operation uses a profile from another Body.",
@@ -273,11 +361,20 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
             };
             for target in &targets {
                 if !s.model.state().bodies.iter().any(|body| &body.name == target) {
-                    blockers.push(warning(
-                        "The target body has not been created.",
+                    let detail = if cut && op.base.is_none() {
+                        format!(
+                            "FreeCAD operation `{}` is subtractive and has no preceding BaseFeature in Body `{}`. The source Body's sketches alone do not create a solid, so SolidCraft has nothing to cut. Add or import the missing base solid before enabling this feature and its dependents.",
+                            op.source_name,
+                            op.body.as_ref().map(|(_, label)| label.as_str()).unwrap_or("unknown"),
+                        )
+                    } else {
                         format!(
                             "SolidCraft target body `{target}` does not exist in the imported model. Its name may have been reserved by a suppressed or missing predecessor. Repair the preceding operation and confirm this feature's target before enabling it."
-                        ),
+                        )
+                    };
+                    blockers.push(warning(
+                        "The target body has not been created.",
+                        detail,
                     ));
                 }
             }
@@ -355,6 +452,9 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
         }
         let skipped = feature_id.is_none();
         outcome.blocked = !blockers.is_empty() || skipped;
+        if !outcome.blocked {
+            outcome.source_feature = feature_id.and_then(|id| s.doc.feature(id).map(|feature| feature.name.clone()));
+        }
         warnings.extend(blockers);
         let mut context = format!("FreeCAD operation: `{}` (`{}`, {}).", op.label, op.source_name, op.type_name);
         if let Some((source, label)) = &op.body {
