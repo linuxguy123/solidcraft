@@ -202,6 +202,11 @@ fn import(app: &mut SolveApp, dialog: &mut Dialog) -> bool {
                     dialog.previews.push(preview);
                 }
             }
+            for issue in value["body_warnings"].as_array().into_iter().flatten() {
+                if let Ok(warning) = serde_json::from_value::<FreeCadWarning>(issue.clone()) {
+                    warnings.push(warning);
+                }
+            }
             app.set_status(&summary, false);
             dialog.report = Some((summary, warnings));
             false
@@ -219,6 +224,9 @@ fn show_detail(detail: &mut Option<FreeCadWarning>, ctx: &egui::Context) {
     let (closed, action) = ui_kit::Window::new(egui::Id::new("sc_freecad_import_warning"), "warning", "FreeCAD Import Details")
         .actions("", "Close", None)
         .show(ctx, true, |ui| {
+            if ui_kit::button(ui, "Copy", ui_kit::Button::Normal).clicked() {
+                ui.ctx().copy_text(all.clone());
+            }
             let heading = ui.add(egui::Label::new(egui::RichText::new(&warning.summary).strong()).wrap().selectable(true));
             let detail = ui.add(egui::Label::new(&warning.detail).wrap().selectable(true));
             for response in [&heading, &detail] {
@@ -344,7 +352,7 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
             if dialog.organization == 0 {
                 ui_kit::text(
                     ui,
-                    "FreeCAD Parts become nested components. Bodies become named groups in each component's Sketches folder.",
+                    "FreeCAD Parts and Bodies become nested components. Each Body component contains its own Bodies, Sketches and Features folders. Missing solids are explained in the import report.",
                     ui_kit::Text::Note("organization_help"),
                 );
             } else {

@@ -564,15 +564,21 @@ fn recover_plane(object: &RawObject, objects: &HashMap<&str, &RawObject>, parent
             return;
         };
         // Newer saved documents can address an origin plane through its owning Origin,
-        // with the plane's object name in the subelement slot. Resolve only an actual
-        // App::Plane listed among that Origin's features; never guess from a name prefix.
+        // with the plane's object name in the subelement slot. Some cloned documents
+        // retain an older plane object name after the Origin's feature list changes.
+        // In that case the explicit App::Plane object and the sketch's saved Placement
+        // still identify a usable static plane; report the lost source relationship.
         let origin_plane = if support.type_name == "App::Origin" {
-            support
-                .children
-                .iter()
-                .find(|child| *child == sub)
-                .and_then(|child| objects.get(child.as_str()))
-                .filter(|plane| plane.type_name == "App::Plane")
+            let member = support.children.iter().any(|child| child == sub);
+            let plane = objects.get(sub.as_str()).filter(|plane| plane.type_name == "App::Plane");
+            if plane.is_some() && !member {
+                warn(
+                    &mut sketch.warnings,
+                    "The saved origin plane is retained, but its Origin link is stale.",
+                    format!("Sketch `{}` refers to `{support_name}` subelement `{sub}`. `{sub}` is an App::Plane object in the file, but it is not listed among that Origin's current features. The sketch uses its saved position and orientation; its link to the FreeCAD Origin is not retained.", object.source_name),
+                );
+            }
+            plane
         } else {
             None
         };

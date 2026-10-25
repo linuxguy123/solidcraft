@@ -10,10 +10,12 @@ use crate::{Result, Session, params::bad};
 
 pub(super) struct ImportedSketch {
     pub id: u64,
+    pub label: String,
     pub component: u64,
     pub body: Option<(String, String)>,
     pub curves: Vec<Option<String>>,
     pub needs_repair: bool,
+    pub warnings: Vec<FreeCadWarning>,
 }
 
 pub(super) fn plan(operations: &[FreeCadOperation], params: &Value) -> Result<Vec<FreeCadOperation>> {
@@ -215,7 +217,23 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                 ));
             }
             if sketch.needs_repair {
-                blockers.push(warning("The profile sketch needs repair before this operation can be enabled.", "Its source attachment is unresolved or some profile geometry could not be imported. The saved plane and available geometry are retained. Redefine the sketch plane or repair the profile, then enable this operation and its dependents."));
+                let reasons = sketch
+                    .warnings
+                    .iter()
+                    .filter(|issue| issue.summary.starts_with("Geometry ") || issue.summary.contains("attachment"))
+                    .map(|issue| format!("{} {}", issue.summary, issue.detail))
+                    .collect::<Vec<_>>();
+                let detail = format!(
+                    "Profile sketch `{}` (`{}`) needs repair. {} The saved plane and available geometry are retained. Redefine the sketch plane or repair the profile, then enable this operation and its dependents.",
+                    sketch.label,
+                    op.profile,
+                    if reasons.is_empty() {
+                        "Its source attachment is unresolved or some profile geometry could not be imported.".to_string()
+                    } else {
+                        reasons.join("\n\n")
+                    }
+                );
+                blockers.push(warning("The profile sketch needs repair before this operation can be enabled.", detail));
             }
             let cut = matches!(settings, FreeCadOperationSettings::Extrude { cut: true, .. } | FreeCadOperationSettings::Revolve { cut: true, .. });
             let targets = if op.base.is_some() || cut {
@@ -228,6 +246,16 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
             } else {
                 Vec::new()
             };
+            for target in &targets {
+                if !s.model.state().bodies.iter().any(|body| &body.name == target) {
+                    blockers.push(warning(
+                        "The target body has not been created.",
+                        format!(
+                            "SolidCraft target body `{target}` does not exist in the imported model. Its name may have been reserved by a suppressed or missing predecessor. Repair the preceding operation and confirm this feature's target before enabling it."
+                        ),
+                    ));
+                }
+            }
             match kind(s, sketch, settings, &targets, op.base.is_some()) {
                 Ok(kind) => {
                     let label = if blockers.is_empty() { op.label.clone() } else { format!("{} [Needs repair]", op.label) };
@@ -258,7 +286,16 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                     let before: BTreeSet<String> = s.model.state().bodies.iter().map(|body| body.name.clone()).collect();
                     s.refresh();
                     if blockers.is_empty() {
-                        if let Some(error) = s.model.result(id).and_then(|result| result.error.as_ref()).cloned() {
+                        let error = match s.model.result(id) {
+                            Some(result) => result.error.clone(),
+                            None => Some("The imported feature has no evaluation result.".into()),
+                        }
+                        .or_else(|| {
+                            body_name.as_ref().filter(|name| !s.model.state().bodies.iter().any(|body| body.name == name.as_str())).map(|name| {
+                                format!("The feature evaluated without creating its expected SolidCraft body `{name}`. Check the profile's closed regions, plane and extent.")
+                            })
+                        });
+                        if let Some(error) = error {
                             blockers.push(warning("SolidCraft could not rebuild this operation; it was imported suppressed.", error));
                             if let Some(feature) = s.doc_mut().feature_mut(id) {
                                 feature.suppressed = true;
@@ -297,6 +334,38 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
         let skipped = feature_id.is_none();
         outcome.blocked = !blockers.is_empty() || skipped;
         warnings.extend(blockers);
+        let mut context = format!("FreeCAD operation: `{}` (`{}`, {}).", op.label, op.source_name, op.type_name);
+        if let Some((source, label)) = &op.body {
+            context.push_str(&format!(" FreeCAD Body: `{label}` (`{source}`)."));
+        }
+        if !op.profile.is_empty() {
+            if let Some(sketch) = sketches.get(&op.profile) {
+                context.push_str(&format!(" Profile sketch: `{}` (`{}`).", sketch.label, op.profile));
+            } else {
+                context.push_str(&format!(" Profile sketch: `{}` (unavailable).", op.profile));
+            }
+        }
+        if let Some(base) = &op.base {
+            if let Some(predecessor) = by_name.get(base.as_str()) {
+                context.push_str(&format!(" Preceding operation: `{}` (`{}`).", predecessor.label, base));
+                if !predecessor.profile.is_empty() {
+                    if let Some(profile) = sketches.get(&predecessor.profile) {
+                        context.push_str(&format!(" Preceding profile sketch: `{}` (`{}`).", profile.label, predecessor.profile));
+                    } else {
+                        context.push_str(&format!(" Preceding profile sketch: `{}` (unavailable).", predecessor.profile));
+                    }
+                }
+            } else {
+                context.push_str(&format!(" Preceding operation: `{base}` (unavailable)."));
+            }
+        }
+        if !outcome.bodies.is_empty() {
+            context.push_str(&format!(" Intended SolidCraft body target: {}.", outcome.bodies.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")));
+        }
+        for issue in &mut warnings {
+            issue.detail.push_str("\n\nRelated objects: ");
+            issue.detail.push_str(&context);
+        }
         if skipped {
             let mut detail = format!(
                 "Source operation: {} ({})\n\nThis placeholder records a missing operation. It creates no geometry and cannot be enabled to recreate the original operation. Rebuild that operation manually before repairing its dependents.\n\n",

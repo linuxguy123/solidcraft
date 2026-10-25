@@ -175,6 +175,8 @@ pub(super) fn collect(objects: &[RawObject], by_name: &HashMap<&str, &RawObject>
                     operation.blockers.push(issue("The tapered extrusion requires a direction check.", "The saved taper angle is retained, but FreeCAD and SolidCraft can use different taper-side conventions. Check the angle and result before enabling this suppressed feature."));
                 }
                 match (length, length2, taper) {
+                    (Some(first), Some(second), Some(taper)) if side == 1.0 && (first == 0.0 || first == -1.0) && second > 0.0 =>
+                        Some(FreeCadOperationSettings::Extrude { length: second, length2: None, symmetric: false, reversed: !reversed, cut, through_all, taper }),
                     (Some(length), Some(second), Some(taper)) if (length > 0.0 || through_all) && second >= 0.0 =>
                         Some(FreeCadOperationSettings::Extrude { length, length2: (side == 1.0).then_some(second), symmetric, reversed, cut, through_all, taper }),
                     _ => {

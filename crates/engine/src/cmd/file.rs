@@ -48,7 +48,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("path: FreeCAD .FCStd file → {project, nodes, sketches, operations}; reads its Part/Body/Sketch hierarchy and operation settings without changing the design"),
     CommandSpec::new("file.import_freecad_sketches", "Import FreeCAD Sketches", import_freecad_sketches)
         .icon("import")
-        .params("path: FreeCAD .FCStd file; sketches?: [source object names] (default: all); organization?: hierarchy|flat (default hierarchy: FreeCAD Parts become nested components and Bodies become sketch groups; flat: all sketches go in the active component); naming?: original|body|path (flat only, default original); preserve_planes?: bool (default true: preserve saved non-face planes and parent placements; false: every sketch uses XY); import_operations?: bool (default false); operations?: [source operation names] (default all when enabled; required base operations and profile sketches are included automatically). Pad/Pocket become Extrude new/join/cut; Revolution/Groove become Revolve new/join/cut. Fixed extents, reversed, symmetric, two-sided and through-all Pocket are supported. Unresolved attachments retain their saved plane; affected native operations and dependents are suppressed for repair. Unsupported operations are reported as skipped. Operation import requires preserve_planes:true. All additions are one undo step; operations in the reply report feature ids, status and detailed warnings."),
+        .params("path: FreeCAD .FCStd file; sketches?: [source object names] (default: all); organization?: hierarchy|flat (default hierarchy: FreeCAD Parts and Bodies become nested components; flat: all sketches go in the active component); naming?: original|body|path (flat only, default original); preserve_planes?: bool (default true: preserve saved non-face planes and parent placements; false: every sketch uses XY); import_operations?: bool (default false); operations?: [source operation names] (default all when enabled; required base operations and profile sketches are included automatically). Pad/Pocket become Extrude new/join/cut; Revolution/Groove become Revolve new/join/cut. Fixed extents, reversed, symmetric, two-sided and through-all Pocket are supported. Unresolved attachments retain their saved plane; affected native operations and dependents are suppressed for repair. Unsupported operations are reported as skipped. Operation import requires preserve_planes:true. All additions are one undo step; operations in the reply report feature ids, status and detailed warnings."),
     CommandSpec::new("file.freecad_import_report", "FreeCAD Import Report", freecad_report::report)
         .noundo()
         .params("report: {project, source, summary, warnings: [{summary, detail, context?}], previews?: [saved sketch previews]}; path?: destination Markdown file; images?: bool (default true). Returns Markdown including every More description. When saving, also writes annotated PNGs in an adjacent images folder where source geometry is available. Copy returns text without image files. Does not change the design."),
@@ -356,7 +356,7 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
     let import_parent = s.active_component;
     let mut part_components = std::collections::BTreeMap::<Vec<String>, u64>::new();
     let mut created_components = Vec::new();
-    let mut body_groups = std::collections::BTreeMap::<(u64, String), (String, Vec<String>)>::new();
+    let mut body_components = std::collections::BTreeMap::<(u64, String), (String, u64)>::new();
     let mut datum_planes = std::collections::BTreeMap::<(u64, String), String>::new();
     let mut imported = Vec::new();
     let mut warnings = Vec::new();
@@ -378,7 +378,7 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
         }
-        let component = if organization == "hierarchy" {
+        let mut component = if organization == "hierarchy" {
             let mut parent = import_parent;
             let mut key = Vec::new();
             for (source_name, label) in &source.parts {
@@ -397,6 +397,20 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
         } else {
             import_parent
         };
+        if organization == "hierarchy"
+            && let Some((body_source, body_label)) = &source.body
+        {
+            let key = (component, body_source.clone());
+            component = if let Some((_, id)) = body_components.get(&key) {
+                *id
+            } else {
+                let parent = component;
+                let id = s.doc_mut().add_component(Some(body_label), parent)?;
+                body_components.insert(key, (body_label.clone(), id));
+                created_components.push(json!({"source": body_source, "name": body_label, "component": id, "parent": parent, "kind": "body"}));
+                id
+            };
+        }
         let name = match naming {
             "body" => source.body.as_ref().map(|(_, body)| format!("{body} — {}", source.label)).unwrap_or_else(|| source.label.clone()),
             "path" => {
@@ -437,17 +451,14 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
             source.source_name.clone(),
             freecad_operations::ImportedSketch {
                 id,
+                label: source.label.clone(),
                 component,
                 body: source.body.clone(),
                 curves: source.source_curves.clone(),
                 needs_repair: source.attachment_unresolved || source.warnings.iter().any(|warning| warning.summary.starts_with("Geometry ")),
+                warnings: source.warnings.clone(),
             },
         );
-        if organization == "hierarchy"
-            && let Some((body_source, body_label)) = &source.body
-        {
-            body_groups.entry((component, body_source.clone())).or_insert_with(|| (body_label.clone(), Vec::new())).1.push(id.to_string());
-        }
         for warning in &source.warnings {
             warnings.push(json!({"sketch": name, "summary": warning.summary, "detail": warning.detail}));
         }
@@ -465,15 +476,67 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
     if imported.is_empty() && operations.is_empty() {
         return Err(bad(cmd, "the file contains no selected sketches"));
     }
-    let mut created_groups = Vec::new();
-    for ((component, source), (name, items)) in body_groups {
-        let id = s.doc_mut().allocate_id()?;
-        s.doc_mut().browser_groups.push(solidcraft_doc::BrowserGroup { id, name: name.clone(), component, folder: "sketches".into(), items });
-        created_groups.push(json!({"source": source, "name": name, "group": id, "component": component}));
+    let mut known_body_components: std::collections::BTreeSet<u64> = s
+        .doc
+        .metadata
+        .get("org.solidcraft.freecad.body_components")
+        .and_then(|value| value.get("ids"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
+    known_body_components.extend(body_components.values().map(|(_, id)| *id));
+    if !known_body_components.is_empty() {
+        s.doc_mut().metadata.set("org.solidcraft.freecad.body_components", json!({"ids": known_body_components}))?;
     }
     s.active_sketch = None;
     s.refresh();
     let operation_results = freecad_operations::import(s, &operations, &operation_sketches)?;
+    let mut body_warnings = Vec::new();
+    if organization == "hierarchy" && import_operations {
+        for ((_, source), (label, component)) in &body_components {
+            let intended = operations
+                .iter()
+                .filter(|op| op.body.as_ref().is_some_and(|(body_source, _)| body_source == source) && op.base.is_none())
+                .filter_map(|op| operation_results.iter().find(|result| result["source"].as_str() == Some(op.source_name.as_str())))
+                .filter_map(|result| result["feature"].as_u64())
+                .filter_map(|feature| s.doc.feature(feature))
+                .find_map(|feature| feature.body_names.first().cloned())
+                .unwrap_or_else(|| label.clone());
+            let has_solid = s.model.state().bodies.iter().any(|body| s.doc.model_body_component(body) == *component && body.name == intended);
+            if !has_solid {
+                let sketches = operation_sketches
+                    .iter()
+                    .filter(|(_, sketch)| sketch.body.as_ref().is_some_and(|(body_source, _)| body_source == source))
+                    .map(|(source_name, sketch)| format!("`{}` (`{source_name}`)", sketch.label))
+                    .collect::<Vec<_>>();
+                let body_operations = operations
+                    .iter()
+                    .filter(|op| op.body.as_ref().is_some_and(|(body_source, _)| body_source == source))
+                    .map(|op| {
+                        let status = operation_results.iter().find(|result| result["source"].as_str() == Some(op.source_name.as_str()))
+                            .and_then(|result| result["status"].as_str()).unwrap_or("not selected");
+                        format!("`{}` ({}, {status})", op.label, op.type_name)
+                    })
+                    .collect::<Vec<_>>();
+                let has_starting_operation = operations.iter().any(|op| {
+                    op.body.as_ref().is_some_and(|(body_source, _)| body_source == source)
+                        && op.base.is_none()
+                        && matches!(&op.settings, Some(solidcraft_io::FreeCadOperationSettings::Extrude { cut: false, .. } | solidcraft_io::FreeCadOperationSettings::Revolve { cut: false, .. }))
+                });
+                body_warnings.push(json!({
+                    "summary": format!("FreeCAD Body `{label}` has no imported SolidCraft solid."),
+                    "detail": format!(
+                        "FreeCAD Body `{label}` (`{source}`) is a child component with no solid in its Bodies folder.\n\nImported sketches: {}.\n\nSource operations: {}.\n\n{} This importer rebuilds editable features from the saved history; it does not currently use FreeCAD's cached final Body shape. Review the operation issues and repair or rebuild the missing feature history to create the solid.",
+                        if sketches.is_empty() { "none".into() } else { sketches.join(", ") },
+                        if body_operations.is_empty() { "none".into() } else { body_operations.join(", ") },
+                        if has_starting_operation { "The available starting operation did not produce a SolidCraft solid." } else { "No supported additive starting operation is available for this Body." },
+                    ),
+                }));
+            }
+        }
+    }
     Ok(json!({
         "path": path,
         "project": project.label,
@@ -481,10 +544,11 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
         "naming": naming,
         "preserve_planes": preserve_planes,
         "components": created_components,
-        "groups": created_groups,
+        "groups": [],
         "imported": imported,
         "operations": operation_results,
         "warnings": warnings,
+        "body_warnings": body_warnings,
     }))
 }
 

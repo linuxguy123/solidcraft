@@ -152,6 +152,10 @@ fn freecad_operations_import_dependencies_target_only_their_body_and_undo_togeth
     assert_eq!(operations.len(), 2, "the Pad dependency is included automatically");
     assert_eq!(operations[0]["source"], "Pad");
     assert!(operations.iter().all(|op| op["status"] == "imported"), "{operations:?}");
+    let plate_component = session.doc.components.iter().find(|component| component.name == "Plate").unwrap().id;
+    assert!(session.model.state().bodies.iter().any(|body| body.name == "Plate" && session.doc.model_body_component(body) == plate_component), "the imported FreeCAD Body owns its solid");
+    assert!(operations.iter().all(|op| session.doc.feature(op["feature"].as_u64().unwrap()).is_some_and(|feature| feature.component == plate_component)), "the Body component owns its operation history");
+    assert!(session.doc.browser_groups.is_empty(), "the Body component's standard folders hold solids and sketches directly");
     assert!((volume(&mut session) - 6900.0).abs() < 1e-6, "Pocket cuts Plate only, not the overlapping Unrelated body");
     assert_eq!(session.undo.len(), 2, "one undo step for the complete import");
     let id = operations[1]["feature"].as_u64().unwrap();
@@ -196,6 +200,8 @@ fn freecad_face_attached_operation_keeps_its_saved_plane_and_waits_for_repair() 
     let operations = imported["operations"].as_array().unwrap();
     assert_eq!(operations[0]["status"], "imported");
     assert_eq!(operations[1]["status"], "needs_repair");
+    let warnings = operations[1]["warnings"].as_array().unwrap();
+    assert!(warnings.iter().any(|issue| issue["detail"].as_str().is_some_and(|detail| detail.contains("PocketProfile") && detail.contains("Face6") && detail.contains("Plate"))), "the report names the profile, source attachment, and body: {warnings:?}");
     let feature = session.doc.feature(operations[1]["feature"].as_u64().unwrap()).unwrap();
     assert!(feature.suppressed);
     let solidcraft_doc::FeatureKind::Extrude { sketch, .. } = &feature.kind else { panic!("expected native Pocket") };
@@ -203,6 +209,26 @@ fn freecad_face_attached_operation_keeps_its_saved_plane_and_waits_for_repair() 
     assert!((plane.origin.z - 10.0).abs() < 1e-9, "the face-attached sketch keeps its saved location");
     assert!((volume(&mut session) - 6000.0).abs() < 1e-6);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn freecad_pad_with_only_second_side_length_imports_as_reverse_extrude() {
+    let fixture = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml");
+    for first in ["0", "-1"] {
+        let xml = fixture.replace(
+            "<Property name=\"Length\"><Float value=\"10\"/></Property>",
+            &format!("<Property name=\"Length\"><Float value=\"{first}\"/></Property><Property name=\"Length2\"><Float value=\"8\"/></Property><Property name=\"SideType\"><Integer value=\"1\"/></Property>"),
+        );
+        let (dir, path) = file("second-side-pad", "source.FCStd", &operations_archive(&xml));
+        let mut session = Session::default();
+        let imported = run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Pad"]}));
+        assert_eq!(imported["operations"][0]["status"], "imported", "{imported}");
+        let feature = session.doc.feature(imported["operations"][0]["feature"].as_u64().unwrap()).unwrap();
+        assert!(matches!(&feature.kind, solidcraft_doc::FeatureKind::Extrude { extent, .. }
+            if matches!(extent.direction, solidcraft_doc::Direction::Negative) && extent.distance2.is_none()));
+        assert!((volume(&mut session) - 4800.0).abs() < 1e-6);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[test]
@@ -251,11 +277,20 @@ fn freecad_unsupported_history_blocks_dependents_and_cycles_do_not_change_the_de
         run(&mut session, "file.import_freecad_sketches", json!({"path":path,"sketches":[],"import_operations":true,"operations":["Pocket"]}));
     assert_eq!(imported["operations"][0]["status"], "skipped");
     assert_eq!(imported["operations"][1]["status"], "needs_repair");
+    let warnings = imported["operations"][1]["warnings"].as_array().unwrap();
+    assert!(warnings.iter().any(|issue| issue["summary"] == "The target body has not been created."
+        && issue["detail"].as_str().is_some_and(|detail| detail.contains("Plate") && detail.contains("Pad") && detail.contains("PocketProfile"))), "the missing predecessor and target body must be named: {warnings:?}");
     let placeholder = session.doc.feature(imported["operations"][0]["feature"].as_u64().unwrap()).unwrap();
     assert!(placeholder.name.starts_with("[Not imported]"));
     assert!(matches!(&placeholder.kind, solidcraft_doc::FeatureKind::ImportPlaceholder { source, source_type, detail }
         if source == "Pad" && source_type == "PartDesign::Fillet" && !detail.is_empty()));
     assert!(session.model.state().bodies.is_empty(), "skipping an unsupported predecessor must not enable a later cut");
+    let plate_component = session.doc.components.iter().find(|component| component.name == "Plate").unwrap().id;
+    assert!(session.doc.metadata.get("org.solidcraft.freecad.body_components").and_then(|value| value.get("ids")).and_then(serde_json::Value::as_array)
+        .is_some_and(|ids| ids.iter().any(|id| id.as_u64() == Some(plate_component))));
+    assert!(session.doc.browser_groups.is_empty(), "a missing solid leaves an empty Bodies folder in the Body component");
+    let body_issue = imported["body_warnings"].as_array().unwrap().iter().find(|warning| warning["summary"].as_str().is_some_and(|summary| summary.contains("Plate"))).unwrap();
+    assert!(body_issue["detail"].as_str().is_some_and(|detail| detail.contains("PadProfile") && detail.contains("PocketProfile") && detail.contains("PartDesign::Fillet") && detail.contains("No supported additive starting operation")), "the missing Body explanation lists its contents: {body_issue}");
     let _ = std::fs::remove_dir_all(dir);
 
     let cyclic = xml.replace(
@@ -290,11 +325,10 @@ fn freecad_sketches_can_be_inspected_and_selectively_imported_in_one_undo_step()
     assert_eq!(s.doc.features.len(), 1);
     let feature = &s.doc.features[0];
     assert_eq!(feature.name, "Mounting Profile");
-    assert_eq!(s.doc.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>(), ["Bracket"]);
-    assert_eq!(s.doc.browser_groups.len(), 1);
-    assert_eq!((s.doc.browser_groups[0].name.as_str(), s.doc.browser_groups[0].folder.as_str()), ("Plate", "sketches"));
-    assert_eq!(s.doc.browser_groups[0].items, [feature.id.to_string()]);
-    assert_eq!(feature.component, s.doc.components[0].id);
+    assert_eq!(s.doc.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>(), ["Bracket", "Plate"]);
+    assert!(s.doc.browser_groups.is_empty());
+    assert_eq!(s.doc.components[1].parent, s.doc.components[0].id);
+    assert_eq!(feature.component, s.doc.components[1].id);
     let solidcraft_doc::FeatureKind::Sketch { plane: solidcraft_doc::PlaneRef::Origin { name }, sketch } = &feature.kind else {
         panic!("import did not make a sketch")
     };

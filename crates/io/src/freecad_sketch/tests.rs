@@ -208,7 +208,11 @@ fn origin_plane_referenced_through_its_origin_is_not_a_face_attachment() {
     assert!((sketch.plane.y - Vec3::Z).len() < 1e-9);
     let unowned = xml.replace("<Link value=\"XZ_Plane004\"/>", "<Link value=\"UnrelatedPlane\"/>");
     let project = read_freecad_sketches(&archive(unowned.as_bytes()), "unowned-plane.FCStd").unwrap();
-    assert!(project.sketches[0].attachment_unresolved, "a named plane must actually belong to the referenced Origin");
+    assert!(!project.sketches[0].attachment_unresolved, "an explicitly named App::Plane retains the saved static plane");
+    assert!(project.sketches[0].warnings.iter().any(|warning| warning.summary.contains("Origin link is stale")));
+    let missing = xml.replace("sub=\"XZ_Plane004\"", "sub=\"MissingPlane\"");
+    let project = read_freecad_sketches(&archive(missing.as_bytes()), "missing-plane.FCStd").unwrap();
+    assert!(project.sketches[0].attachment_unresolved, "a missing plane cannot be inferred from its name");
 }
 
 #[test]
