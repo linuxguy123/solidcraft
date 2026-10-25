@@ -97,6 +97,78 @@ fn circle_centers_on_sketch_axes_retain_geometric_constraints() {
 }
 
 #[test]
+fn symmetry_about_freecad_sketch_axes_keeps_circle_centers_and_line_endpoints() {
+    let xml = r#"<Document><Objects><Object name="Symmetric" type="Sketcher::SketchObject"/></Objects>
+      <ObjectData><Object name="Symmetric"><Properties>
+        <Property name="Geometry"><GeometryList>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="10" CenterY="10" Radius="1.5"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="-10" CenterY="10" Radius="1.5"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="10" CenterY="-10" Radius="1.5"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="-10" CenterY="-10" Radius="1.5"/></Geometry>
+          <Geometry type="Part::GeomLineSegment"><LineSegment StartX="10" StartY="0" EndX="10" EndY="5"/></Geometry>
+          <Geometry type="Part::GeomLineSegment"><LineSegment StartX="-10" StartY="5" EndX="-10" EndY="0"/></Geometry>
+        </GeometryList></Property>
+        <Property name="Constraints"><ConstraintList>
+          <Constrain Type="14" First="1" FirstPos="3" Second="0" SecondPos="3" Third="-2" ThirdPos="0"/>
+          <Constrain Type="14" First="3" FirstPos="3" Second="2" SecondPos="3" Third="-2" ThirdPos="0"/>
+          <Constrain Type="14" First="1" FirstPos="3" Second="3" SecondPos="3" Third="-1" ThirdPos="0"/>
+          <Constrain Type="14" First="4" FirstPos="2" Second="5" SecondPos="1" Third="-2" ThirdPos="0"/>
+        </ConstraintList></Property>
+      </Properties></Object></ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "symmetry.FCStd").unwrap();
+    let source = &project.sketches[0];
+    assert!(source.warnings.is_empty(), "sketch axes are available symmetry references: {:?}", source.warnings);
+    assert_eq!(source.source_curves.len(), 6, "linked axis helpers do not become FreeCAD source geometry");
+    let (Some(x), Some(y)) = (source.sketch.sketch_axis_curve("x"), source.sketch.sketch_axis_curve("y")) else {
+        panic!("both linked sketch axes were created")
+    };
+    let axes = source.sketch.constraints.iter().filter_map(|constraint| match &constraint.kind {
+        ConstraintKind::Symmetric { l, .. } => Some(*l),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(axes, [y, y, x, y]);
+    assert!(source.sketch.curves[x].construction && source.sketch.curves[y].construction);
+}
+
+#[test]
+fn symmetry_about_the_sketch_origin_keeps_circle_centers_opposite() {
+    let xml = r#"<Document><Objects><Object name="Sketch" type="Sketcher::SketchObject"/></Objects>
+      <ObjectData><Object name="Sketch"><Properties>
+        <Property name="Geometry"><GeometryList>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="57" CenterY="0" Radius="9.25"/></Geometry>
+          <Geometry type="Part::GeomCircle"><Circle CenterX="-57" CenterY="0" Radius="9.25"/></Geometry>
+        </GeometryList></Property>
+        <Property name="Constraints"><ConstraintList>
+          <Constrain Type="13" First="0" FirstPos="3" Second="-1" SecondPos="0"/>
+          <Constrain Type="18" Value="18.5" First="0"/>
+          <Constrain Type="18" Value="18.5" First="1"/>
+          <Constrain Type="14" First="1" FirstPos="3" Second="0" SecondPos="3" Third="-1" ThirdPos="1"/>
+          <Constrain Type="7" Value="114" First="1" FirstPos="3" Second="0" SecondPos="3"/>
+        </ConstraintList></Property>
+      </Properties></Object></ObjectData></Document>"#;
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "origin-symmetry.FCStd").unwrap();
+    let source = &project.sketches[0];
+    assert!(source.warnings.is_empty(), "the sketch origin is an available symmetry center: {:?}", source.warnings);
+    assert_eq!(source.source_curves.len(), 2, "the construction line is not FreeCAD source geometry");
+    let CurveKind::Circle { c: right, .. } = source.sketch.curves[0].kind else { panic!("expected a circle") };
+    let CurveKind::Circle { c: left, .. } = source.sketch.curves[1].kind else { panic!("expected a circle") };
+    let midpoint = source.sketch.constraints.iter().find_map(|constraint| match &constraint.kind {
+        ConstraintKind::Midpoint { p: 0, l } => Some(*l),
+        _ => None,
+    }).expect("origin-centered midpoint constraint");
+    assert!(source.sketch.curves[midpoint].construction);
+    assert!(matches!(source.sketch.curves[midpoint].kind, CurveKind::Line { a, b } if a == left && b == right));
+
+    let mut sketch = source.sketch.clone();
+    sketch.points[right].pos = Vec2::new(65.0, 2.0);
+    sketch.points[left].pos = Vec2::new(-53.0, -3.0);
+    let solved = solidcraft_sketch::solve(&mut sketch);
+    assert!(solved.ok(), "{solved:?}");
+    assert!((sketch.point(right).unwrap() - Vec2::new(57.0, 0.0)).len() < 1e-6);
+    assert!((sketch.point(left).unwrap() - Vec2::new(-57.0, 0.0)).len() < 1e-6);
+}
+
+#[test]
 fn basic_operations_retain_profiles_dependencies_dimensions_and_axes() {
     let xml = include_str!("operations_fixture.xml");
     let project = read_freecad_sketches(&archive(xml.as_bytes()), "operations.FCStd").unwrap();
@@ -118,6 +190,20 @@ fn basic_operations_retain_profiles_dependencies_dimensions_and_axes() {
     let project = read_freecad_sketches(&archive(unsupported.as_bytes()), "unsupported.FCStd").unwrap();
     let pocket = project.operations.iter().find(|op| op.source_name == "Pocket").unwrap();
     assert!(!pocket.blockers.is_empty());
+}
+
+#[test]
+fn negative_one_sided_extrusion_lengths_reverse_the_saved_direction() {
+    let xml = include_str!("operations_fixture.xml")
+        .replace("<Property name=\"Length\"><Float value=\"10\"/></Property>", "<Property name=\"Length\"><Float value=\"-10\"/></Property>")
+        .replace("<Property name=\"Length\"><Float value=\"4\"/></Property>", "<Property name=\"Length\"><Float value=\"-4\"/></Property>");
+    let project = read_freecad_sketches(&archive(xml.as_bytes()), "negative-extrusion.FCStd").unwrap();
+    let pad = project.operations.iter().find(|op| op.source_name == "Pad").unwrap();
+    assert!(pad.blockers.is_empty(), "the negative pad length is a valid saved FreeCAD extent");
+    assert!(matches!(pad.settings, Some(FreeCadOperationSettings::Extrude { length: 10.0, reversed: true, cut: false, .. })));
+    let pocket = project.operations.iter().find(|op| op.source_name == "Pocket").unwrap();
+    assert!(pocket.blockers.is_empty(), "the negative pocket length is a valid saved FreeCAD extent");
+    assert!(matches!(pocket.settings, Some(FreeCadOperationSettings::Extrude { length: 4.0, reversed: true, cut: true, .. })));
 }
 
 #[test]
@@ -209,14 +295,24 @@ fn origin_plane_referenced_through_its_origin_is_not_a_face_attachment() {
     let unowned = xml.replace("<Link value=\"XZ_Plane004\"/>", "<Link value=\"UnrelatedPlane\"/>");
     let project = read_freecad_sketches(&archive(unowned.as_bytes()), "unowned-plane.FCStd").unwrap();
     assert!(!project.sketches[0].attachment_unresolved, "an explicitly named App::Plane retains the saved static plane");
-    assert!(project.sketches[0].warnings.iter().any(|warning| warning.summary.contains("Origin link is stale")));
+    assert!(project.sketches[0].warnings.is_empty(), "an Origin membership mismatch does not affect the imported sketch plane");
+    let dotted = xml.replace("sub=\"XZ_Plane004\"", "sub=\"XZ_Plane004.\"");
+    let project = read_freecad_sketches(&archive(dotted.as_bytes()), "dotted-plane.FCStd").unwrap();
+    assert!(!project.sketches[0].attachment_unresolved, "FreeCAD's trailing dot still names the Origin plane");
+    assert!(project.sketches[0].warnings.is_empty());
+    assert_eq!(project.sketches[0].plane_description, "Origin plane: XZ plane");
     let missing = xml.replace("sub=\"XZ_Plane004\"", "sub=\"MissingPlane\"");
     let project = read_freecad_sketches(&archive(missing.as_bytes()), "missing-plane.FCStd").unwrap();
     assert!(project.sketches[0].attachment_unresolved, "a missing plane cannot be inferred from its name");
+    let detached = xml.replace("<Link obj=\"Origin\" sub=\"XZ_Plane004\"/>", "");
+    let project = read_freecad_sketches(&archive(detached.as_bytes()), "detached-plane.FCStd").unwrap();
+    assert!(!project.sketches[0].attachment_unresolved, "an empty support list leaves the saved sketch plane usable");
+    assert!(project.sketches[0].warnings.is_empty());
+    assert_eq!(project.sketches[0].plane_description, "Saved sketch plane (source support not recorded)");
 }
 
 #[test]
-fn planes_keep_saved_frames_parent_placements_and_report_face_fallbacks() {
+fn planes_keep_saved_frames_parent_placements_and_independent_face_attachments() {
     let xml = r#"<Document><Objects>
       <Object name="Part" type="App::Part"/><Object name="Body" type="PartDesign::Body"/>
       <Object name="Datum" type="PartDesign::Plane"/><Object name="XZ" type="App::Plane"/>
@@ -245,7 +341,7 @@ fn planes_keep_saved_frames_parent_placements_and_report_face_fallbacks() {
         <Property name="Support"><LinkSub value="Solid"><Sub value="Face2"/></LinkSub></Property>
         <Property name="Placement"><PropertyPlacement Px="0" Py="0" Pz="50" Q0="0" Q1="0" Q2="0" Q3="1"/></Property>
       </Properties></Object>
-      <Object name="Solid"><Properties/></Object>
+      <Object name="Solid"><Properties><Property name="Label"><String value="Mounting Pad"/></Property></Properties></Object>
     </ObjectData></Document>"#;
     let project = read_freecad_sketches(&archive(xml.as_bytes()), "planes.FCStd").unwrap();
     let sketch = project.sketches.iter().find(|s| s.source_name == "Sketch").unwrap();
@@ -257,9 +353,24 @@ fn planes_keep_saved_frames_parent_placements_and_report_face_fallbacks() {
     assert_eq!(label, "Mounting plane");
     assert!((datum.origin - Vec3::new(100.0, 0.0, 17.0)).len() < 1e-9);
     let face = project.sketches.iter().find(|s| s.source_name == "FaceSketch").unwrap();
-    assert_eq!(face.plane, Plane::XY);
-    assert!(face.warnings.iter().any(|w| w.detail.contains("Face2")));
+    assert!((face.plane.origin - Vec3::new(100.0, 0.0, 55.0)).len() < 1e-9);
+    assert!(!face.attachment_unresolved);
+    assert_eq!(face.warnings.len(), 1);
+    assert_eq!(face.warnings[0].severity, FreeCadWarningSeverity::Warning);
+    assert!(face.warnings[0].detail.contains("dynamically attached"));
+    assert!(face.warnings[0].detail.contains("static, independent plane"));
+    assert!(face.warnings[0].detail.contains("Mounting Pad") && face.warnings[0].detail.contains("Solid") && face.warnings[0].detail.contains("Face2"));
+    assert_eq!(face.plane_description, "Saved sketch plane (independent of Solid Face2)");
     assert!(face.datum.is_none());
+
+    let sketch_attached = xml.replace("<LinkSub value=\"Solid\"><Sub value=\"Face2\"/></LinkSub>", "<LinkSub value=\"Sketch\"><Sub value=\"\"/></LinkSub>");
+    let project = read_freecad_sketches(&archive(sketch_attached.as_bytes()), "sketch-attached.FCStd").unwrap();
+    let attached = project.sketches.iter().find(|s| s.source_name == "FaceSketch").unwrap();
+    assert!(!attached.attachment_unresolved);
+    assert_eq!(attached.warnings.len(), 1);
+    assert_eq!(attached.warnings[0].severity, FreeCadWarningSeverity::Warning);
+    assert!(attached.warnings[0].detail.contains("Sketch"));
+    assert_eq!(attached.plane_description, "Saved sketch plane (independent of Sketch)");
 
     let invalid = xml.replace("Q0=\"0.7071067811865475\" Q1=\"0\" Q2=\"0\" Q3=\"0.7071067811865476\"", "Q0=\"0\" Q1=\"0\" Q2=\"0\" Q3=\"0\"");
     let project = read_freecad_sketches(&archive(invalid.as_bytes()), "invalid-plane.FCStd").unwrap();

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde_json::{Value, json};
 use solidcraft_doc::{AxisRef, BodyName, Direction, Extent, ExtrudeConvention, FeatureKind, Operation, RevolveConvention, SketchId};
 use solidcraft_geom::{Vec2, Vec3};
-use solidcraft_io::{FreeCadAxis, FreeCadOperation, FreeCadOperationSettings, FreeCadWarning};
+use solidcraft_io::{FreeCadAxis, FreeCadOperation, FreeCadOperationSettings, FreeCadWarning, FreeCadWarningSeverity};
 
 use crate::{Result, Session, params::bad};
 
@@ -71,7 +71,7 @@ pub(super) fn plan(operations: &[FreeCadOperation], params: &Value) -> Result<Ve
 }
 
 fn warning(summary: &str, detail: impl Into<String>) -> FreeCadWarning {
-    FreeCadWarning { summary: summary.into(), detail: detail.into(), context: None }
+    FreeCadWarning { summary: summary.into(), detail: detail.into(), severity: FreeCadWarningSeverity::Issue, context: None }
 }
 
 fn axis(s: &Session, sketch: &ImportedSketch, source: &FreeCadAxis) -> std::result::Result<(AxisRef, Vec3, Vec3), String> {
@@ -181,14 +181,39 @@ struct Outcome {
     blocked: bool,
 }
 
+fn reserve_body_name(used: &mut BTreeSet<String>, base: &str) -> String {
+    let mut name = base.to_string();
+    let mut suffix = 2;
+    while used.contains(&name) {
+        name = format!("{base} ({suffix})");
+        suffix += 1;
+    }
+    used.insert(name.clone());
+    name
+}
+
 pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches: &BTreeMap<String, ImportedSketch>) -> Result<Vec<Value>> {
     let mut outcomes = BTreeMap::<String, Outcome>::new();
     let by_name: BTreeMap<&str, &FreeCadOperation> = operations.iter().map(|op| (op.source_name.as_str(), op)).collect();
     let mut reports = Vec::new();
     let mut used_bodies: BTreeSet<String> = s.model.state().bodies.iter().map(|body| body.name.clone()).collect();
+    let mut source_bodies = BTreeMap::<String, String>::new();
+    for op in operations {
+        if let Some((source, label)) = &op.body
+            && !source_bodies.contains_key(source)
+        {
+            let base = if label.trim().is_empty() { source } else { label };
+            source_bodies.insert(source.clone(), reserve_body_name(&mut used_bodies, base));
+        }
+    }
     for op in operations {
         let parent = op.base.as_ref().and_then(|base| outcomes.get(base)).cloned();
         let mut outcome = parent.clone().unwrap_or_default();
+        if let Some((source, _)) = &op.body
+            && let Some(name) = source_bodies.get(source)
+        {
+            outcome.bodies = vec![name.clone()];
+        }
         let mut warnings = op.warnings.clone();
         let mut blockers = op.blockers.clone();
         if let Some(base) = op.base.as_deref().and_then(|name| by_name.get(name))
@@ -263,15 +288,12 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                     let id = s.doc_mut().add_feature(kind, Some(&name))?;
                     let new_body = !cut && op.base.is_none();
                     let body_name = if new_body {
-                        let base = sketch.body.as_ref().map(|(_, label)| label.as_str()).unwrap_or(&op.label);
-                        let mut name = base.to_string();
-                        let mut suffix = 2;
-                        while used_bodies.contains(&name) {
-                            name = format!("{base} ({suffix})");
-                            suffix += 1;
+                        if let Some((source, _)) = &op.body {
+                            source_bodies.get(source).cloned()
+                        } else {
+                            let base = sketch.body.as_ref().map(|(_, label)| label.as_str()).unwrap_or(&op.label);
+                            Some(reserve_body_name(&mut used_bodies, base))
                         }
-                        used_bodies.insert(name.clone());
-                        Some(name)
                     } else {
                         None
                     };

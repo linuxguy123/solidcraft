@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use solidcraft_geom::Vec2;
-use solidcraft_io::{FreeCadSketchPreview, FreeCadWarning, vfs};
+use solidcraft_io::{FreeCadSketchPreview, FreeCadWarning, FreeCadWarningSeverity, vfs};
 use solidcraft_render::{SketchIssueCurve, sketch_issue_png};
 
 use crate::{Result, Session, params::bad};
@@ -70,13 +70,14 @@ fn picture(preview: &FreeCadSketchPreview, issue: &FreeCadWarning, number: usize
             unavailable.push(if index < 0 { format!("external reference {index}") } else { format!("geometry {}", i64::from(index) + 1) });
         }
     }
+    let kind = if issue.severity == FreeCadWarningSeverity::Warning { "warning" } else { "issue" };
     let mut caption = if context.references.is_empty() {
-        String::from(
-            "Sketch overview only: this issue does not identify a defective curve or point, so nothing is highlighted. The picture shows local sketch geometry; support objects and 3D attachment are not shown. Read the issue explanation above for the attachment or placement limitation.",
+        format!(
+            "Sketch overview only: this {kind} does not identify a defective curve or point, so nothing is highlighted. The picture shows local sketch geometry; support objects and 3D attachment are not shown. Read the {kind} explanation above for the attachment or placement limitation."
         )
     } else {
-        String::from(
-            "Saved source sketch coordinates. Red curves and rings identify available referenced entities; numbers match this report's issue number. Pale lines show the sketch axes. This is diagnostic context, not a repaired sketch.",
+        format!(
+            "Saved source sketch coordinates. Red curves and rings identify available referenced entities; numbers match this report's {kind} number. Pale lines show the sketch axes. This is diagnostic context, not a repaired sketch."
         )
     };
     if !unavailable.is_empty() {
@@ -116,15 +117,26 @@ pub(super) fn report(_: &mut Session, params: &Value) -> Result<Value> {
     let mut text =
         format!("# FreeCAD Import Report\n\nProject: {}\n\nSource: {}\n\n{}\n\n", md(&report.project), md(&report.source), md(&report.summary));
     if report.warnings.is_empty() {
-        text.push_str("No import issues were reported.\n");
+        text.push_str("No import issues or warnings were reported.\n");
     }
     let mut assets = Vec::new();
     let mut image_errors = Vec::new();
     let mut attempted_images = 0;
-    for (index, issue) in report.warnings.iter().enumerate() {
-        text.push_str(&format!("## Issue {}: {}\n\n{}\n\n", index + 1, md(&issue.summary), md(&issue.detail)));
+    let mut issue_number = 0;
+    let mut warning_number = 0;
+    for issue in &report.warnings {
+        let (kind, number) = if issue.severity == FreeCadWarningSeverity::Warning {
+            warning_number += 1;
+            ("Warning", warning_number)
+        } else {
+            issue_number += 1;
+            ("Issue", issue_number)
+        };
+        text.push_str(&format!("## {kind} {number}: {}\n\n{}\n\n", md(&issue.summary), md(&issue.detail)));
         let preview = issue.context.as_ref().and_then(|c| report.previews.iter().find(|p| p.source == c.sketch));
-        if images
+        let wants_image = issue.severity == FreeCadWarningSeverity::Issue
+            || issue.context.as_ref().is_some_and(|context| !context.references.is_empty());
+        if images && wants_image
             && let Some(path) = path
             && let Some(preview) = preview
         {
@@ -133,27 +145,27 @@ pub(super) fn report(_: &mut Session, params: &Value) -> Result<Value> {
                 continue;
             }
             attempted_images += 1;
-            let (png, caption) = picture(preview, issue, index + 1);
+            let (png, caption) = picture(preview, issue, number);
             let saved = png.ok_or_else(|| "No renderable source geometry is available.".to_string()).and_then(|png| {
                 let destination = std::path::Path::new(path);
                 let folder_name = format!("{}-images", destination.file_stem().and_then(|s| s.to_str()).unwrap_or("import-report"));
                 let parent = destination.parent().unwrap_or_else(|| std::path::Path::new("."));
                 let folder = parent.join(&folder_name);
                 vfs::create_dir_all(&folder.to_string_lossy()).map_err(|e| e.to_string())?;
-                let file_name = format!("issue-{:03}.png", index + 1);
+                let file_name = format!("{}-{number:03}.png", kind.to_ascii_lowercase());
                 let image_path = folder.join(&file_name);
                 vfs::write(&image_path.to_string_lossy(), &png).map_err(|e| e.to_string())?;
                 assets.push(image_path.to_string_lossy().to_string());
                 Ok(url(&format!("{folder_name}/{file_name}")))
             });
             match saved {
-                Ok(link) => text.push_str(&format!("![Sketch context for issue {}]({link})\n\n{}\n\n", index + 1, md(&caption))),
+                Ok(link) => text.push_str(&format!("![Sketch context for {kind} {number}]({link})\n\n{}\n\n", md(&caption))),
                 Err(error) => {
-                    image_errors.push(format!("Issue {}: {error}", index + 1));
+                    image_errors.push(format!("{kind} {number}: {error}"));
                     text.push_str(&format!("Image unavailable: {}\n\n", md(&error)));
                 }
             }
-        } else if images && issue.context.is_some() && preview.is_none() {
+        } else if images && wants_image && issue.context.is_some() && preview.is_none() {
             text.push_str("Image unavailable: saved sketch geometry was not retained for this issue.\n\n");
         }
     }

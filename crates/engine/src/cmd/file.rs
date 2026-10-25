@@ -48,7 +48,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("path: FreeCAD .FCStd file → {project, nodes, sketches, operations}; reads its Part/Body/Sketch hierarchy and operation settings without changing the design"),
     CommandSpec::new("file.import_freecad_sketches", "Import FreeCAD Sketches", import_freecad_sketches)
         .icon("import")
-        .params("path: FreeCAD .FCStd file; sketches?: [source object names] (default: all); organization?: hierarchy|flat (default hierarchy: FreeCAD Parts and Bodies become nested components; flat: all sketches go in the active component); naming?: original|body|path (flat only, default original); preserve_planes?: bool (default true: preserve saved non-face planes and parent placements; false: every sketch uses XY); import_operations?: bool (default false); operations?: [source operation names] (default all when enabled; required base operations and profile sketches are included automatically). Pad/Pocket become Extrude new/join/cut; Revolution/Groove become Revolve new/join/cut. Fixed extents, reversed, symmetric, two-sided and through-all Pocket are supported. Unresolved attachments retain their saved plane; affected native operations and dependents are suppressed for repair. Unsupported operations are reported as skipped. Operation import requires preserve_planes:true. All additions are one undo step; operations in the reply report feature ids, status and detailed warnings."),
+        .params("path: FreeCAD .FCStd file; sketches?: [source object names] (default: all); organization?: hierarchy|flat (default hierarchy: FreeCAD Parts and Bodies become nested components; flat: all sketches go in the active component); naming?: original|body|path (flat only, default original); preserve_planes?: bool (default true: preserve saved sketch planes and parent placements; false: every sketch uses XY); import_operations?: bool (default false); operations?: [source operation names] (default all when enabled; required base operations and profile sketches are included automatically). Pad/Pocket become Extrude new/join/cut; Revolution/Groove become Revolve new/join/cut. Fixed extents, reversed, symmetric, two-sided and through-all Pocket are supported. Face- and sketch-attached profiles with valid saved placements import on independent planes with nonblocking warnings. Attachments with no usable saved plane suppress affected operations for repair. Unsupported operations are reported as skipped. Operation import requires preserve_planes:true. All additions are one undo step; operations in the reply report feature ids, status and detailed warnings."),
     CommandSpec::new("file.freecad_import_report", "FreeCAD Import Report", freecad_report::report)
         .noundo()
         .params("report: {project, source, summary, warnings: [{summary, detail, context?}], previews?: [saved sketch previews]}; path?: destination Markdown file; images?: bool (default true). Returns Markdown including every More description. When saving, also writes annotated PNGs in an adjacent images folder where source geometry is available. Copy returns text without image files. Does not change the design."),
@@ -506,6 +506,18 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
                 .unwrap_or_else(|| label.clone());
             let has_solid = s.model.state().bodies.iter().any(|body| s.doc.model_body_component(body) == *component && body.name == intended);
             if !has_solid {
+                let has_starting_operation = operations.iter().any(|op| {
+                    op.body.as_ref().is_some_and(|(body_source, _)| body_source == source)
+                        && op.base.is_none()
+                        && matches!(
+                            op.type_name.as_str(),
+                            "PartDesign::Pad" | "PartDesign::Revolution" | "PartDesign::AdditivePipe" | "PartDesign::AdditiveLoft"
+                                | "Part::Extrusion" | "Part::Revolution"
+                        )
+                });
+                if !has_starting_operation {
+                    continue;
+                }
                 let sketches = operation_sketches
                     .iter()
                     .filter(|(_, sketch)| sketch.body.as_ref().is_some_and(|(body_source, _)| body_source == source))
@@ -520,18 +532,13 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
                         format!("`{}` ({}, {status})", op.label, op.type_name)
                     })
                     .collect::<Vec<_>>();
-                let has_starting_operation = operations.iter().any(|op| {
-                    op.body.as_ref().is_some_and(|(body_source, _)| body_source == source)
-                        && op.base.is_none()
-                        && matches!(&op.settings, Some(solidcraft_io::FreeCadOperationSettings::Extrude { cut: false, .. } | solidcraft_io::FreeCadOperationSettings::Revolve { cut: false, .. }))
-                });
                 body_warnings.push(json!({
                     "summary": format!("FreeCAD Body `{label}` has no imported SolidCraft solid."),
                     "detail": format!(
                         "FreeCAD Body `{label}` (`{source}`) is a child component with no solid in its Bodies folder.\n\nImported sketches: {}.\n\nSource operations: {}.\n\n{} This importer rebuilds editable features from the saved history; it does not currently use FreeCAD's cached final Body shape. Review the operation issues and repair or rebuild the missing feature history to create the solid.",
                         if sketches.is_empty() { "none".into() } else { sketches.join(", ") },
                         if body_operations.is_empty() { "none".into() } else { body_operations.join(", ") },
-                        if has_starting_operation { "The available starting operation did not produce a SolidCraft solid." } else { "No supported additive starting operation is available for this Body." },
+                        "The source has an additive starting operation, but it did not produce a SolidCraft solid.",
                     ),
                 }));
             }
@@ -1301,11 +1308,13 @@ mod tests {
         let mut session = Session::default();
         let detail = "The circle's center refers to geometry 4.\nReattach it to the datum plane, then enable the operation.";
         let report = json!({"project":"Fixture project", "source":"fixture.FCStd", "summary":"One operation needs repair.",
-            "warnings":[{"summary":"Pocket: attachment needs repair", "detail":detail}]});
+            "warnings":[{"summary":"Pocket: attachment needs repair", "detail":detail},
+                {"summary":"Sketch uses an independent saved plane", "detail":"Its source face will not move this sketch after import.", "severity":"warning"}]});
         let copied = session.execute("file.freecad_import_report", &json!({"report":report})).unwrap();
         let text = copied["text"].as_str().unwrap();
         assert!(text.contains("Source: fixture.FCStd"));
         assert!(text.contains("Issue 1: Pocket: attachment needs repair"));
+        assert!(text.contains("Warning 1: Sketch uses an independent saved plane"));
         assert!(text.contains(detail), "the full More text, including line breaks, is retained");
         let dir = std::env::temp_dir().join(format!("solidcraft-freecad-report-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -65,8 +65,24 @@ pub struct FreeCadSketchInfo {
 pub struct FreeCadWarning {
     pub summary: String,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "FreeCadWarningSeverity::is_issue")]
+    pub severity: FreeCadWarningSeverity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<FreeCadIssueContext>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FreeCadWarningSeverity {
+    #[default]
+    Issue,
+    Warning,
+}
+
+impl FreeCadWarningSeverity {
+    fn is_issue(&self) -> bool {
+        *self == Self::Issue
+    }
 }
 
 /// Source references retained for diagnostic pictures, independent of translated constraints.
@@ -553,7 +569,11 @@ fn recover_plane(object: &RawObject, objects: &HashMap<&str, &RawObject>, parent
             format!("{reason} Local sketch geometry and constraints are retained. Use Redefine Sketch Plane after import to choose a new support."),
         );
     };
-    if object.map_mode != 0 {
+    if object.map_mode != 0 && object.support.is_empty() {
+        // A saved sketch may retain an active MapMode without a recorded support.
+        // Its resolved Placement is still a complete, independent sketch plane.
+        sketch.plane_description = "Saved sketch plane (source support not recorded)".into();
+    } else if object.map_mode != 0 {
         if object.support.len() != 1 {
             fallback(sketch, "The active attachment does not reference exactly one plane.".into());
             return;
@@ -563,31 +583,49 @@ fn recover_plane(object: &RawObject, objects: &HashMap<&str, &RawObject>, parent
             fallback(sketch, format!("The support object `{support_name}` is missing from Document.xml."));
             return;
         };
-        // Newer saved documents can address an origin plane through its owning Origin,
-        // with the plane's object name in the subelement slot. Some cloned documents
-        // retain an older plane object name after the Origin's feature list changes.
-        // In that case the explicit App::Plane object and the sketch's saved Placement
-        // still identify a usable static plane; report the lost source relationship.
+        // Newer saved documents can address an origin plane through an Origin, with
+        // the plane's object name in the subelement slot. The Origin's feature list
+        // may differ from that name, but the named plane and saved sketch Placement
+        // are sufficient for the static plane imported into SolidCraft.
         let origin_plane = if support.type_name == "App::Origin" {
-            let member = support.children.iter().any(|child| child == sub);
-            let plane = objects.get(sub.as_str()).filter(|plane| plane.type_name == "App::Plane");
-            if plane.is_some() && !member {
-                warn(
-                    &mut sketch.warnings,
-                    "The saved origin plane is retained, but its Origin link is stale.",
-                    format!("Sketch `{}` refers to `{support_name}` subelement `{sub}`. `{sub}` is an App::Plane object in the file, but it is not listed among that Origin's current features. The sketch uses its saved position and orientation; its link to the FreeCAD Origin is not retained.", object.source_name),
-                );
-            }
-            plane
+            objects
+                .get(sub.as_str())
+                .or_else(|| sub.strip_suffix('.').and_then(|name| objects.get(name)))
+                .filter(|plane| plane.type_name == "App::Plane")
         } else {
             None
         };
         let (support_name, sub, support) = origin_plane.map(|plane| (&plane.source_name, "", plane)).unwrap_or((support_name, sub.as_str(), support));
         if !sub.is_empty() || !matches!(support.type_name.as_str(), "App::Plane" | "PartDesign::Plane") {
+            if support.type_name != "App::Origin"
+                && matches!(object.placement, Some(Some(_)))
+                && let Some(saved) = sketch.saved_plane
+            {
+                // A face or sketch attachment cannot be reconstructed from a
+                // source subelement name. Its resolved Placement is sufficient
+                // for an independent, editable sketch on the same static plane.
+                sketch.plane = saved;
+                let source = if sub.is_empty() { support_name.to_string() } else { format!("{support_name} {sub}") };
+                sketch.plane_description = format!("Saved sketch plane (independent of {source})");
+                let sketch_label = if object.label.is_empty() { &object.source_name } else { &object.label };
+                let support_label = if support.label.is_empty() { support_name.as_str() } else { support.label.as_str() };
+                let subelement = if sub.is_empty() { String::new() } else { format!(", subelement `{sub}`") };
+                warn_with_severity(
+                    &mut sketch.warnings,
+                    FreeCadWarningSeverity::Warning,
+                    "A dynamic FreeCAD attachment became a static sketch plane.",
+                    format!(
+                        "FreeCAD sketch `{sketch_label}` (`{}`) was dynamically attached to `{support_label}` (`{support_name}`, {}{subelement}). SolidCraft placed it at its saved position and orientation on a static, independent plane. The sketch and its operations can be edited and evaluated, but changes to the supporting geometry in SolidCraft will not move the sketch automatically. Reattach it to a SolidCraft face or plane if that relationship is needed.",
+                        object.source_name,
+                        support.type_name,
+                    ),
+                );
+                return;
+            }
             fallback(
                 sketch,
                 format!(
-                    "The sketch is attached to `{support_name}` ({}) subelement `{sub}`. Face, edge and vertex attachments are not imported yet.",
+                    "The sketch is attached to `{support_name}` ({}) subelement `{sub}`, and its saved sketch plane is unavailable. Redefine the sketch plane after import.",
                     support.type_name
                 ),
             );
@@ -757,7 +795,11 @@ fn build_node(
 }
 
 fn warn(warnings: &mut Vec<FreeCadWarning>, summary: impl Into<String>, detail: impl Into<String>) {
-    let warning = FreeCadWarning { summary: summary.into(), detail: detail.into(), context: None };
+    warn_with_severity(warnings, FreeCadWarningSeverity::Issue, summary, detail);
+}
+
+fn warn_with_severity(warnings: &mut Vec<FreeCadWarning>, severity: FreeCadWarningSeverity, summary: impl Into<String>, detail: impl Into<String>) {
+    let warning = FreeCadWarning { summary: summary.into(), detail: detail.into(), severity, context: None };
     if warnings.len() < MAX_WARNINGS && !warnings.contains(&warning) {
         warnings.push(warning);
     }
@@ -971,7 +1013,7 @@ fn convert_sketch(object: &RawObject) -> FreeCadSketch {
             }
             continue;
         }
-        let Some(kind) = convert_constraint(constraint, &maps) else {
+        let Some(kind) = convert_constraint(constraint, &maps, &mut sketch) else {
             let entities = constraint_entities(object, constraint);
             if constraint_name(constraint.kind).is_some() {
                 warn_references(
@@ -1088,7 +1130,7 @@ fn line_points(maps: &[GeometryMap], entity: i32) -> Option<(usize, usize)> {
     Some((map.start?, map.end?))
 }
 
-fn convert_constraint(c: &RawConstraint, maps: &[GeometryMap]) -> Option<ConstraintKind> {
+fn convert_constraint(c: &RawConstraint, maps: &[GeometryMap], sketch: &mut Sketch) -> Option<ConstraintKind> {
     let first_curve = || curve_ref(maps, c.first);
     let second_curve = || curve_ref(maps, c.second);
     let first_point = || point_ref(maps, c.first, c.first_pos);
@@ -1124,7 +1166,26 @@ fn convert_constraint(c: &RawConstraint, maps: &[GeometryMap]) -> Option<Constra
         13 if c.second == -1 && c.second_pos == 0 => ConstraintKind::HorizontalPoints { p: 0, q: first_point()? },
         13 if c.second == -2 && c.second_pos == 0 => ConstraintKind::VerticalPoints { p: 0, q: first_point()? },
         13 => ConstraintKind::PointOnCurve { p: first_point()?, c: second_curve()? },
-        14 => ConstraintKind::Symmetric { p: first_point()?, q: second_point()?, l: curve_ref(maps, c.third)? },
+        14 if c.third_pos == 1 => {
+            let (p, q, center) = (first_point()?, second_point()?, point_ref(maps, c.third, c.third_pos)?);
+            if p == q || p == center || q == center {
+                return None;
+            }
+            // SolidCraft represents symmetry about a point as a construction
+            // line between the two points with its midpoint on the center.
+            let l = sketch.add_line_pts(p, q, None).ok()?;
+            sketch.curves.get_mut(l)?.construction = true;
+            ConstraintKind::Midpoint { p: center, l }
+        }
+        14 => {
+            let (p, q) = (first_point()?, second_point()?);
+            let l = match (c.third, c.third_pos) {
+                (-1, 0) => sketch.sketch_axis_line("x").ok().flatten()?,
+                (-2, 0) => sketch.sketch_axis_line("y").ok().flatten()?,
+                _ => curve_ref(maps, c.third)?,
+            };
+            ConstraintKind::Symmetric { p, q, l }
+        }
         18 => ConstraintKind::Diameter { c: first_curve()?, value: c.value.abs() },
         _ => return None,
     })

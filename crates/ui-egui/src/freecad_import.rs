@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use solidcraft_engine::io::{FreeCadNode, FreeCadNodeKind, FreeCadOperation, FreeCadSketchPreview, FreeCadWarning};
+use solidcraft_engine::io::{FreeCadNode, FreeCadNodeKind, FreeCadOperation, FreeCadSketchPreview, FreeCadWarning, FreeCadWarningSeverity};
 
 use crate::{SolveApp, ui_kit};
 
@@ -159,7 +159,7 @@ fn draw_warning(ui: &mut egui::Ui, warning: &FreeCadWarning, detail: &mut Option
         if ui_kit::button(ui, "More…", ui_kit::Button::Small).clicked() {
             *detail = Some(warning.clone());
         }
-        ui_kit::text(ui, &warning.summary, ui_kit::Text::Report("freecad_warning", true));
+        ui_kit::text(ui, &warning.summary, ui_kit::Text::Report("freecad_warning", warning.severity == FreeCadWarningSeverity::Issue));
     });
 }
 
@@ -264,15 +264,23 @@ pub(crate) fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     copy = ui_kit::button(ui, "Copy", ui_kit::Button::Normal).clicked();
                     save = ui_kit::button(ui, "Save As…", ui_kit::Button::Enabled(can_save)).clicked();
                 });
-                ui_kit::text(ui, "Copy and Save As include every issue and its full More… explanation.", ui_kit::Text::Note("export_help"));
+                ui_kit::text(ui, "Copy and Save As include every issue and warning with its full More… explanation.", ui_kit::Text::Note("export_help"));
                 if !dialog.previews.is_empty() {
                     ui_kit::checkbox(ui, "Include sketch issue images when saving", &mut dialog.report_images);
                 }
                 ui_kit::text(ui, "Save As writes Markdown with available PNG images in an adjacent folder. Keep the report and folder together. Copy includes Markdown text only.", ui_kit::Text::Note("image_help"));
                 ui_kit::text(ui, "Repair the indicated sketch planes, profiles or targets, then enable suppressed features in dependency order. Skipped operations appear as [Not imported] placeholders; double-click one for its explanation. Rebuild skipped operations manually.", ui_kit::Text::Note("repair_help"));
-                for (index, warning) in warnings.iter().enumerate() {
+                let mut issues = 0;
+                let mut notices = 0;
+                for warning in &warnings {
                     let mut numbered = warning.clone();
-                    numbered.summary = format!("Issue {}: {}", index + 1, warning.summary);
+                    numbered.summary = if warning.severity == FreeCadWarningSeverity::Warning {
+                        notices += 1;
+                        format!("Warning {notices}: {}", warning.summary)
+                    } else {
+                        issues += 1;
+                        format!("Issue {issues}: {}", warning.summary)
+                    };
                     draw_warning(ui, &numbered, &mut dialog.detail);
                 }
                 if let Some((message, error)) = &dialog.report_message {

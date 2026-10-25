@@ -73,7 +73,7 @@ pub(super) fn capture(object: &mut RawObject, tag: &[u8], property: &str, attrs:
 }
 
 fn issue(summary: impl Into<String>, detail: impl Into<String>) -> FreeCadWarning {
-    FreeCadWarning { summary: summary.into(), detail: detail.into(), context: None }
+    FreeCadWarning { summary: summary.into(), detail: detail.into(), severity: FreeCadWarningSeverity::Issue, context: None }
 }
 
 fn value(object: &RawObject, property: &str, default: f64) -> Option<f64> {
@@ -174,6 +174,11 @@ pub(super) fn collect(objects: &[RawObject], by_name: &HashMap<&str, &RawObject>
                 if taper.is_some_and(|angle| angle.abs() > 1e-9) || value(object, "TaperAngle2", 0.0).is_some_and(|angle| angle.abs() > 1e-9) {
                     operation.blockers.push(issue("The tapered extrusion requires a direction check.", "The saved taper angle is retained, but FreeCAD and SolidCraft can use different taper-side conventions. Check the angle and result before enabling this suppressed feature."));
                 }
+                // FreeCAD accepts a negative one-sided length and extrudes in the
+                // opposite direction even when its Reversed property is false.
+                let negative_length = mode == 0.0 && side == 0.0 && length.is_some_and(|value| value < 0.0);
+                let length = length.map(|value| if negative_length { -value } else { value });
+                let reversed = reversed != negative_length;
                 match (length, length2, taper) {
                     (Some(first), Some(second), Some(taper)) if side == 1.0 && (first == 0.0 || first == -1.0) && second > 0.0 =>
                         Some(FreeCadOperationSettings::Extrude { length: second, length2: None, symmetric: false, reversed: !reversed, cut, through_all, taper }),
