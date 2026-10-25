@@ -356,7 +356,7 @@ pub(super) fn collect(objects: &[RawObject], by_name: &HashMap<&str, &RawObject>
                 return operation;
             }
             if !matches!(object.type_name.as_str(), "PartDesign::Pad" | "PartDesign::Pocket" | "PartDesign::Revolution" | "PartDesign::Groove") {
-                let mut detail = format!("FreeCAD operation `{}` has type `{}`. This importer currently rebuilds Pad, Pocket, Revolution, Groove, Mirrored and PolarPattern when their saved references are supported. Operations depending on this feature require repair.", object.source_name, object.type_name);
+                let mut detail = format!("FreeCAD operation `{}` has type `{}`. This importer currently rebuilds Pad, Pocket, Revolution, Groove, Mirrored and PolarPattern when their saved references are supported. Later operations may rebuild on the available body, but their shape can differ until this operation is restored.", object.source_name, object.type_name);
                 if object.type_name == "PartDesign::Fillet" {
                     detail.push_str("\n\n");
                     detail.push_str(&fillet_details(object, by_name));

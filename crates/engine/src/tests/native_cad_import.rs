@@ -477,6 +477,42 @@ fn freecad_unsupported_history_blocks_dependents_and_cycles_do_not_change_the_de
 }
 
 #[test]
+fn freecad_pad_after_missing_fillet_builds_on_the_available_body() {
+    let xml = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml")
+        .replace(
+            "<Object name=\"Pad\" type=\"PartDesign::Pad\"/>",
+            "<Object name=\"Pad\" type=\"PartDesign::Pad\"/><Object name=\"Fillet\" type=\"PartDesign::Fillet\"/><Object name=\"Pad002\" type=\"PartDesign::Pad\"/>",
+        )
+        .replace(
+            "<Link value=\"PadProfile\"/><Link value=\"Pad\"/><Link value=\"PocketProfile\"/>",
+            "<Link value=\"PadProfile\"/><Link value=\"Pad\"/><Link value=\"Fillet\"/><Link value=\"Pad002\"/><Link value=\"PocketProfile\"/>",
+        )
+        .replace(
+            "</ObjectData>",
+            "<Object name=\"Fillet\"><Properties><Property name=\"BaseFeature\"><Link value=\"Pad\"/></Property></Properties></Object>\
+             <Object name=\"Pad002\"><Properties><Property name=\"BaseFeature\"><Link value=\"Fillet\"/></Property>\
+             <Property name=\"Profile\"><LinkSub value=\"PocketProfile\"/></Property>\
+             <Property name=\"Length\"><Float value=\"4\"/></Property></Properties></Object></ObjectData>",
+        );
+    let (dir, path) = file("pad-after-fillet", "source.FCStd", &operations_archive(&xml));
+    let mut session = Session::default();
+    let imported = run(&mut session, "file.import_freecad_sketches", json!({
+        "path": path, "sketches": [], "import_operations": true, "operations": ["Pad002"]
+    }));
+    let operations = imported["operations"].as_array().unwrap();
+    assert_eq!(operations.len(), 3);
+    assert_eq!(operations[0]["status"], "imported");
+    assert_eq!(operations[1]["status"], "skipped");
+    assert_eq!(operations[2]["status"], "imported", "{operations:?}");
+    let pad = session.doc.feature(operations[2]["feature"].as_u64().unwrap()).unwrap();
+    assert_eq!(pad.name, "Pad002");
+    assert!(!pad.suppressed);
+    assert!(operations[2]["warnings"].as_array().unwrap().iter().any(|w| w["severity"] == "warning"));
+    assert!((volume(&mut session) - 6100.0).abs() < 1e-6);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn freecad_missing_base_feature_keeps_one_reserved_target_through_the_body_history() {
     let xml = include_str!("../../../io/src/freecad_sketch/operations_fixture.xml")
         .replace("<Object name=\"Pad\" type=\"PartDesign::Pad\"/>", "<Object name=\"BaseFeature\" type=\"PartDesign::FeatureBase\"/><Object name=\"Pad\" type=\"PartDesign::Pad\"/>")

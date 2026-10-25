@@ -74,6 +74,10 @@ fn warning(summary: &str, detail: impl Into<String>) -> FreeCadWarning {
     FreeCadWarning { summary: summary.into(), detail: detail.into(), severity: FreeCadWarningSeverity::Issue, context: None }
 }
 
+fn advisory(summary: &str, detail: impl Into<String>) -> FreeCadWarning {
+    FreeCadWarning { summary: summary.into(), detail: detail.into(), severity: FreeCadWarningSeverity::Warning, context: None }
+}
+
 fn axis(s: &Session, sketch: &ImportedSketch, source: &FreeCadAxis) -> std::result::Result<(AxisRef, Vec3, Vec3), String> {
     let state = s.model.state();
     let solved = state.sketch(sketch.id).ok_or("The profile sketch could not be evaluated.")?;
@@ -232,13 +236,25 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
             ));
         }
         if op.base.is_some() && parent.as_ref().is_none_or(|parent| parent.blocked) {
-            blockers.push(warning(
-                "An earlier operation needs repair.",
-                format!(
-                    "This operation depends on `{}`. Resolve its missing or suppressed predecessor before enabling this one. A [Not imported] placeholder records a missing operation that must be rebuilt manually.",
-                    op.base.as_deref().unwrap_or_default()
-                ),
-            ));
+            let predecessor = op.base.as_deref().unwrap_or_default();
+            let has_target = !outcome.bodies.is_empty()
+                && outcome.bodies.iter().all(|name| s.model.state().body(name).is_some());
+            let sketch_based = matches!(op.settings.as_ref(), Some(FreeCadOperationSettings::Extrude { .. } | FreeCadOperationSettings::Revolve { .. }));
+            if sketch_based && has_target {
+                warnings.push(advisory(
+                    "The preceding operation is missing; this feature was rebuilt on the available body.",
+                    format!(
+                        "FreeCAD placed this operation after `{predecessor}`, which was not rebuilt in SolidCraft. The profile operation can still run on the body's current solid. Its result may differ from FreeCAD until `{predecessor}` is rebuilt earlier in the timeline."
+                    ),
+                ));
+            } else {
+                blockers.push(warning(
+                    "An earlier operation needs repair.",
+                    format!(
+                        "This operation depends on `{predecessor}`. Resolve its missing or suppressed predecessor before enabling this one. A [Not imported] placeholder records a missing operation that must be rebuilt manually."
+                    ),
+                ));
+            }
         }
         let mut feature_id = None;
         if let Some(settings @ (FreeCadOperationSettings::Mirror { .. } | FreeCadOperationSettings::PolarPattern { .. })) = &op.settings {
@@ -490,7 +506,7 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
         }
         if skipped {
             let mut detail = format!(
-                "Source operation: {} ({})\n\nThis placeholder records a missing operation. It creates no geometry and cannot be enabled to recreate the original operation. Rebuild that operation manually before repairing its dependents.\n\n",
+                "Source operation: {} ({})\n\nThis placeholder records a missing operation. It creates no geometry and cannot be enabled to recreate the original operation. Rebuild it manually to recover the source shape. Later features may have been built on the body without it.\n\n",
                 op.label, op.source_name
             );
             for issue in &warnings {
