@@ -2,7 +2,10 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Value, json};
-use solidcraft_doc::{AxisRef, BodyName, Dir, Direction, Extent, ExtrudeConvention, FeatureKind, FeatureName, Operation, PatternKind, PlaneRef, Position, RevolveConvention, SketchId};
+use solidcraft_doc::{
+    AxisRef, BodyName, Dir, Direction, Extent, ExtrudeConvention, FeatureKind, FeatureName, Operation, PatternKind, PlaneRef, Position,
+    RevolveConvention, SketchId,
+};
 use solidcraft_geom::{Vec2, Vec3};
 use solidcraft_io::{FreeCadAxis, FreeCadOperation, FreeCadOperationSettings, FreeCadWarning, FreeCadWarningSeverity};
 
@@ -221,7 +224,11 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
         if let Some((source, _)) = &op.body
             && let Some(name) = source_bodies.get(source)
             && (outcome.bodies.is_empty()
-                || !op.base.as_deref().and_then(|base| by_name.get(base)).is_some_and(|base| base.body.as_ref().map(|(name, _)| name) == Some(source)))
+                || !op
+                    .base
+                    .as_deref()
+                    .and_then(|base| by_name.get(base))
+                    .is_some_and(|base| base.body.as_ref().map(|(name, _)| name) == Some(source)))
         {
             outcome.bodies = vec![name.clone()];
         }
@@ -237,9 +244,9 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
         }
         if op.base.is_some() && parent.as_ref().is_none_or(|parent| parent.blocked) {
             let predecessor = op.base.as_deref().unwrap_or_default();
-            let has_target = !outcome.bodies.is_empty()
-                && outcome.bodies.iter().all(|name| s.model.state().body(name).is_some());
-            let sketch_based = matches!(op.settings.as_ref(), Some(FreeCadOperationSettings::Extrude { .. } | FreeCadOperationSettings::Revolve { .. }));
+            let has_target = !outcome.bodies.is_empty() && outcome.bodies.iter().all(|name| s.model.state().body(name).is_some());
+            let sketch_based =
+                matches!(op.settings.as_ref(), Some(FreeCadOperationSettings::Extrude { .. } | FreeCadOperationSettings::Revolve { .. }));
             if sketch_based && has_target {
                 warnings.push(advisory(
                     "The preceding operation is missing; this feature was rebuilt on the available body.",
@@ -278,7 +285,10 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                 let kind = match settings {
                     FreeCadOperationSettings::Mirror { plane, .. } => {
                         if body_missing {
-                            blockers.push(warning("The mirror's source body is unavailable.", "The preceding operation did not create the body to mirror. Repair that operation before rebuilding this mirror."));
+                            blockers.push(warning(
+                                "The mirror's source body is unavailable.",
+                                "The preceding operation did not create the body to mirror. Repair that operation before rebuilding this mirror.",
+                            ));
                         }
                         Some(FeatureKind::Mirror {
                             features: if mirror_body { Vec::new() } else { vec![FeatureName(source_name.clone())] },
@@ -314,11 +324,18 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                     }
                     s.refresh();
                     if blockers.is_empty() {
-                        let created: Vec<String> = s.model.state().bodies.iter().filter(|body| !before.contains(&body.name)).map(|body| body.name.clone()).collect();
-                        let error = s.model.result(id).and_then(|result| result.error.clone())
+                        let created: Vec<String> =
+                            s.model.state().bodies.iter().filter(|body| !before.contains(&body.name)).map(|body| body.name.clone()).collect();
+                        let error = s
+                            .model
+                            .result(id)
+                            .and_then(|result| result.error.clone())
                             .or_else(|| s.model.result(id).is_none().then(|| "The imported transform has no evaluation result.".into()))
-                            .or_else(|| (!op.body_allows_compound && !created.is_empty())
-                                .then(|| "The transform created separate solids, but the source FreeCAD Body does not permit a compound result.".into()));
+                            .or_else(|| {
+                                (!op.body_allows_compound && !created.is_empty()).then(|| {
+                                    "The transform created separate solids, but the source FreeCAD Body does not permit a compound result.".into()
+                                })
+                            });
                         if let Some(error) = error {
                             blockers.push(warning("SolidCraft could not rebuild this operation; it was imported suppressed.", error));
                             if let Some(feature) = s.doc_mut().feature_mut(id) {
@@ -388,10 +405,7 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                             "SolidCraft target body `{target}` does not exist in the imported model. Its name may have been reserved by a suppressed or missing predecessor. Repair the preceding operation and confirm this feature's target before enabling it."
                         )
                     };
-                    blockers.push(warning(
-                        "The target body has not been created.",
-                        detail,
-                    ));
+                    blockers.push(warning("The target body has not been created.", detail));
                 }
             }
             match kind(s, sketch, settings, &targets, op.base.is_some()) {
@@ -498,7 +512,10 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
             }
         }
         if !outcome.bodies.is_empty() {
-            context.push_str(&format!(" Intended SolidCraft body target: {}.", outcome.bodies.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")));
+            context.push_str(&format!(
+                " Intended SolidCraft body target: {}.",
+                outcome.bodies.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")
+            ));
         }
         for issue in &mut warnings {
             issue.detail.push_str("\n\nRelated objects: ");

@@ -170,7 +170,10 @@ impl Cache {
         // its empty Bodies folder visible, just as it was before browser rows were cached.
         let empty = || {
             let imported_body = folder == "bodies"
-                && doc.metadata.get("org.solidcraft.freecad.body_components").and_then(|value| value.get("ids"))
+                && doc
+                    .metadata
+                    .get("org.solidcraft.freecad.body_components")
+                    .and_then(|value| value.get("ids"))
                     .and_then(serde_json::Value::as_array)
                     .is_some_and(|ids| ids.iter().any(|id| id.as_u64() == Some(component)));
             if imported_body { Folder { key: format!("{prefix}/{folder}"), ..Default::default() } } else { Folder::default() }

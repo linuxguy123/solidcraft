@@ -122,10 +122,15 @@ fn symmetry_about_freecad_sketch_axes_keeps_circle_centers_and_line_endpoints() 
     let (Some(x), Some(y)) = (source.sketch.sketch_axis_curve("x"), source.sketch.sketch_axis_curve("y")) else {
         panic!("both linked sketch axes were created")
     };
-    let axes = source.sketch.constraints.iter().filter_map(|constraint| match &constraint.kind {
-        ConstraintKind::Symmetric { l, .. } => Some(*l),
-        _ => None,
-    }).collect::<Vec<_>>();
+    let axes = source
+        .sketch
+        .constraints
+        .iter()
+        .filter_map(|constraint| match &constraint.kind {
+            ConstraintKind::Symmetric { l, .. } => Some(*l),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(axes, [y, y, x, y]);
     assert!(source.sketch.curves[x].construction && source.sketch.curves[y].construction);
 }
@@ -152,10 +157,15 @@ fn symmetry_about_the_sketch_origin_keeps_circle_centers_opposite() {
     assert_eq!(source.source_curves.len(), 2, "the construction line is not FreeCAD source geometry");
     let CurveKind::Circle { c: right, .. } = source.sketch.curves[0].kind else { panic!("expected a circle") };
     let CurveKind::Circle { c: left, .. } = source.sketch.curves[1].kind else { panic!("expected a circle") };
-    let midpoint = source.sketch.constraints.iter().find_map(|constraint| match &constraint.kind {
-        ConstraintKind::Midpoint { p: 0, l } => Some(*l),
-        _ => None,
-    }).expect("origin-centered midpoint constraint");
+    let midpoint = source
+        .sketch
+        .constraints
+        .iter()
+        .find_map(|constraint| match &constraint.kind {
+            ConstraintKind::Midpoint { p: 0, l } => Some(*l),
+            _ => None,
+        })
+        .expect("origin-centered midpoint constraint");
     assert!(source.sketch.curves[midpoint].construction);
     assert!(matches!(source.sketch.curves[midpoint].kind, CurveKind::Line { a, b } if a == left && b == right));
 
@@ -277,10 +287,14 @@ fn mirror_and_circular_pattern_retain_their_saved_sources_and_axes() {
     assert!(matches!(mirror.settings, Some(FreeCadOperationSettings::Mirror { ref original, whole_body: true, .. }) if original == "Pad"));
     let sketch_axis_mirror = project.operations.iter().find(|operation| operation.source_name == "Mirrored001").unwrap();
     assert!(sketch_axis_mirror.blockers.is_empty());
-    assert!(matches!(sketch_axis_mirror.settings, Some(FreeCadOperationSettings::Mirror { plane, whole_body: false, .. }) if plane.normal().dot(Vec3::X) > 1.0 - 1e-9));
+    assert!(
+        matches!(sketch_axis_mirror.settings, Some(FreeCadOperationSettings::Mirror { plane, whole_body: false, .. }) if plane.normal().dot(Vec3::X) > 1.0 - 1e-9)
+    );
     let pattern = project.operations.iter().find(|operation| operation.source_name == "PolarPattern").unwrap();
     assert!(pattern.blockers.is_empty(), "saved pattern axis is available: {:?}", pattern.blockers);
-    assert!(matches!(pattern.settings, Some(FreeCadOperationSettings::PolarPattern { count: 4, angle, ref original, .. }) if angle == 360.0 && original == "Mirrored"));
+    assert!(
+        matches!(pattern.settings, Some(FreeCadOperationSettings::PolarPattern { count: 4, angle, ref original, .. }) if angle == 360.0 && original == "Mirrored")
+    );
 }
 
 #[test]
@@ -609,11 +623,14 @@ fn planes_keep_saved_frames_parent_placements_and_independent_face_attachments()
     assert_eq!(face.warnings[0].severity, FreeCadWarningSeverity::Warning);
     assert!(face.warnings[0].detail.contains("dynamically attached"));
     assert!(face.warnings[0].detail.contains("static, independent plane"));
-    assert!(face.warnings[0].detail.contains("Mounting Pad") && face.warnings[0].detail.contains("Solid") && face.warnings[0].detail.contains("Face2"));
+    assert!(
+        face.warnings[0].detail.contains("Mounting Pad") && face.warnings[0].detail.contains("Solid") && face.warnings[0].detail.contains("Face2")
+    );
     assert_eq!(face.plane_description, "Saved sketch plane (independent of Solid Face2)");
     assert!(face.datum.is_none());
 
-    let sketch_attached = xml.replace("<LinkSub value=\"Solid\"><Sub value=\"Face2\"/></LinkSub>", "<LinkSub value=\"Sketch\"><Sub value=\"\"/></LinkSub>");
+    let sketch_attached =
+        xml.replace("<LinkSub value=\"Solid\"><Sub value=\"Face2\"/></LinkSub>", "<LinkSub value=\"Sketch\"><Sub value=\"\"/></LinkSub>");
     let project = read_freecad_sketches(&archive(sketch_attached.as_bytes()), "sketch-attached.FCStd").unwrap();
     let attached = project.sketches.iter().find(|s| s.source_name == "FaceSketch").unwrap();
     assert!(!attached.attachment_unresolved);

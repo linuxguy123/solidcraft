@@ -46,7 +46,13 @@ pub fn sketch_issue_png(curves: &[SketchIssueCurve], points: &[Vec2], axes: [boo
     let gray = Rgb(90, 102, 116);
     let mut scene = Scene { radius: span * 3.0, background: Some((Rgb(255, 255, 255), Rgb(255, 255, 255))), ..Scene::default() };
     let mut line = |points: Vec<Vec2>, color, width| {
-        scene.lines.push(SceneLine { points: points.into_iter().map(|p| Vec3::new(p.x, p.y, 0.0)).collect(), color, width, on_top: true });
+        scene.lines.push(SceneLine {
+            points: points.into_iter().map(|p| Vec3::new(p.x, p.y, 0.0)).collect(),
+            color,
+            alpha: 1.0,
+            width,
+            on_top: true,
+        });
     };
     // Context first, highlighted entities last, so coincident construction curves stay visible.
     line(

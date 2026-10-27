@@ -1681,7 +1681,8 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     if activate && trial.model.result(id).is_none_or(|r| r.skipped) {
         return Err(bad(cmd, "the rebuilt feature did not produce an active result"));
     }
-    if activate && old.suppressed
+    if activate
+        && old.suppressed
         && let Some(name) = old.name.strip_suffix(" [Needs repair]")
         && !trial.doc.features.iter().any(|feature| feature.id != id && feature.name == name)
         && let Some(slot) = trial.doc_mut().feature_mut(id)

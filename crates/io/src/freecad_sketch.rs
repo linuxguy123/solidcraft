@@ -636,8 +636,7 @@ fn recover_plane(object: &RawObject, objects: &HashMap<&str, &RawObject>, parent
                     "A dynamic FreeCAD attachment became a static sketch plane.",
                     format!(
                         "FreeCAD sketch `{sketch_label}` (`{}`) was dynamically attached to `{support_label}` (`{support_name}`, {}{subelement}). SolidCraft placed it at its saved position and orientation on a static, independent plane. The sketch and its operations can be edited and evaluated, but changes to the supporting geometry in SolidCraft will not move the sketch automatically. Reattach it to a SolidCraft face or plane if that relationship is needed.",
-                        object.source_name,
-                        support.type_name,
+                        object.source_name, support.type_name,
                     ),
                 );
                 return;
@@ -744,10 +743,11 @@ fn project(label: String, objects: Vec<RawObject>, file: &str) -> Result<FreeCad
     let mut seen = BTreeSet::new();
     let mut nodes = Vec::new();
     for object in &objects {
-        if object_kind(&object.type_name).is_some() && !referenced.contains(object.source_name.as_str()) {
-            if let Some(node) = build_node(&object.source_name, &by_name, &sketch_by_name, &mut sketches, &mut seen, &[], &[], None, 0) {
-                nodes.push(node);
-            }
+        if object_kind(&object.type_name).is_some()
+            && !referenced.contains(object.source_name.as_str())
+            && let Some(node) = build_node(&object.source_name, &by_name, &sketch_by_name, &mut sketches, &mut seen, &[], &[], None, 0)
+        {
+            nodes.push(node);
         }
     }
     // Broken group links must not hide an otherwise importable sketch.

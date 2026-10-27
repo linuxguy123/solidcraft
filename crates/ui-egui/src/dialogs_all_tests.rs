@@ -63,8 +63,7 @@ fn imported_repair_extrude_edit_enables_the_existing_feature() {
     h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
     h.app.run("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [10, 10]})).unwrap();
     h.app.run("sketch.finish", json!({})).unwrap();
-    let id = h.app.run("solid.extrude", json!({"distance": 5, "name": "Pad002 [Needs repair]"})).unwrap()["feature"]
-        .as_u64().unwrap();
+    let id = h.app.run("solid.extrude", json!({"distance": 5, "name": "Pad002 [Needs repair]"})).unwrap()["feature"].as_u64().unwrap();
     h.app.run("timeline.suppress", json!({"feature": id, "suppressed": true})).unwrap();
     h.app.edit_feature(id);
     let dialog = h.app.dialog.as_ref().unwrap();

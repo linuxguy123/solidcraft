@@ -134,9 +134,10 @@ pub(super) fn report(_: &mut Session, params: &Value) -> Result<Value> {
         };
         text.push_str(&format!("## {kind} {number}: {}\n\n{}\n\n", md(&issue.summary), md(&issue.detail)));
         let preview = issue.context.as_ref().and_then(|c| report.previews.iter().find(|p| p.source == c.sketch));
-        let wants_image = issue.severity == FreeCadWarningSeverity::Issue
-            || issue.context.as_ref().is_some_and(|context| !context.references.is_empty());
-        if images && wants_image
+        let wants_image =
+            issue.severity == FreeCadWarningSeverity::Issue || issue.context.as_ref().is_some_and(|context| !context.references.is_empty());
+        if images
+            && wants_image
             && let Some(path) = path
             && let Some(preview) = preview
         {

@@ -129,12 +129,18 @@ fn fillet_details(object: &RawObject, objects: &HashMap<&str, &RawObject>) -> St
             detail.push_str(&format!("Selected FreeCAD edges: {}. ", edges.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")));
         }
         if !faces.is_empty() {
-            detail.push_str(&format!("Selected FreeCAD faces: {}. The file does not provide a separate edge list for this face selection. ", faces.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")));
+            detail.push_str(&format!(
+                "Selected FreeCAD faces: {}. The file does not provide a separate edge list for this face selection. ",
+                faces.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")
+            ));
         }
         if !other.is_empty() {
-            detail.push_str(&format!("Other selected subelements: {}. ", other.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")));
+            detail
+                .push_str(&format!("Other selected subelements: {}. ", other.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")));
         }
-        detail.push_str("These identifiers belong to the FreeCAD source model; select the corresponding geometry when rebuilding the fillet in SolidCraft.");
+        detail.push_str(
+            "These identifiers belong to the FreeCAD source model; select the corresponding geometry when rebuilding the fillet in SolidCraft.",
+        );
     }
     detail
 }
@@ -169,11 +175,16 @@ fn polar_pattern_details(object: &RawObject, objects: &HashMap<&str, &RawObject>
         }
         "1" => {
             details.push("Angle mode: spacing between occurrences.".into());
-            details.push(value(object, "Offset", f64::NAN).map_or_else(
-                || "Saved offset angle: unavailable.".into(),
-                |offset| format!("Saved offset angle: {offset}° between occurrences."),
-            ));
-            details.push("The total span may depend on separate per-instance spacing values, so the saved overall Angle property is not treated as active.".into());
+            details.push(
+                value(object, "Offset", f64::NAN).map_or_else(
+                    || "Saved offset angle: unavailable.".into(),
+                    |offset| format!("Saved offset angle: {offset}° between occurrences."),
+                ),
+            );
+            details.push(
+                "The total span may depend on separate per-instance spacing values, so the saved overall Angle property is not treated as active."
+                    .into(),
+            );
         }
         other => details.push(format!("Angle mode: unrecognized saved value `{other}`; total pattern angle cannot be identified reliably.")),
     }

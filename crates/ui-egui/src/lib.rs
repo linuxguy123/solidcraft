@@ -1699,8 +1699,12 @@ impl SolveApp {
         dialogs::cancel(self);
         let Some(f) = self.session.doc.feature(id) else { return };
         if let FeatureKind::ImportPlaceholder { source_type, detail, .. } = &f.kind {
-            self.freecad_operation_detail =
-                Some(solidcraft_engine::io::FreeCadWarning { summary: format!("{} ({source_type})", f.name), detail: detail.clone(), severity: solidcraft_engine::io::FreeCadWarningSeverity::Issue, context: None });
+            self.freecad_operation_detail = Some(solidcraft_engine::io::FreeCadWarning {
+                summary: format!("{} ({source_type})", f.name),
+                detail: detail.clone(),
+                severity: solidcraft_engine::io::FreeCadWarningSeverity::Issue,
+                context: None,
+            });
             return;
         }
         if matches!(f.kind, FeatureKind::Sketch { .. }) {
