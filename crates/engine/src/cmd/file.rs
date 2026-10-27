@@ -358,7 +358,7 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
     let mut part_components = std::collections::BTreeMap::<Vec<String>, u64>::new();
     let mut created_components = Vec::new();
     let mut body_components = std::collections::BTreeMap::<(u64, String), (String, u64)>::new();
-    let mut datum_planes = std::collections::BTreeMap::<(u64, String), String>::new();
+    let mut datum_planes = std::collections::BTreeMap::<(u64, String), u64>::new();
     let mut imported = Vec::new();
     let mut warnings = Vec::new();
     let mut operation_sketches = std::collections::BTreeMap::new();
@@ -489,7 +489,11 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
         .collect();
     known_body_components.extend(body_components.values().map(|(_, id)| *id));
     if !known_body_components.is_empty() {
-        s.doc_mut().metadata.set("org.solidcraft.freecad.body_components", json!({"ids": known_body_components}))?;
+        s.doc_mut().metadata.set(
+            solidcraft_doc::metadata::Owner::Design,
+            "org.solidcraft.freecad.body_components",
+            json!({"ids": known_body_components}),
+        )?;
     }
     s.active_sketch = None;
     s.refresh();
@@ -596,29 +600,28 @@ fn freecad_sketch_plane(
     s: &mut Session,
     source: &solidcraft_io::FreeCadSketch,
     component: u64,
-    datums: &mut std::collections::BTreeMap<(u64, String), String>,
+    datums: &mut std::collections::BTreeMap<(u64, String), u64>,
 ) -> Result<solidcraft_doc::PlaneRef> {
     use solidcraft_doc::{FeatureKind, PlaneRef};
     let Some((source_name, label, datum)) = &source.datum else { return Ok(freecad_explicit_plane(source.plane)) };
     let key = (component, source_name.clone());
-    let name = if let Some(name) = datums.get(&key) {
-        name.clone()
+    let id = if let Some(id) = datums.get(&key) {
+        *id
     } else {
         let label = freecad_feature_name(s, label);
         let id = s.doc_mut().add_feature(FeatureKind::ConstructionPlane { plane: freecad_explicit_plane(*datum) }, Some(&label))?;
         if let Some(feature) = s.doc_mut().feature_mut(id) {
             feature.component = component;
         }
-        let name = label;
-        datums.insert(key, name.clone());
-        name
+        datums.insert(key, id);
+        id
     };
     let delta = source.plane.origin - datum.origin;
     let distance = delta.dot(datum.normal());
     if (delta - datum.normal() * distance).len() > 1e-7 || source.plane.normal().dot(datum.normal()) < 1.0 - 1e-10 {
         return Ok(freecad_explicit_plane(source.plane));
     }
-    let mut plane = PlaneRef::Construction { name: name.into() };
+    let mut plane = PlaneRef::Construction { feature: id.into() };
     if distance.abs() > 1e-9 {
         plane = PlaneRef::Offset { base: Box::new(plane), distance: format!("{distance} mm").into() };
     }
@@ -629,6 +632,7 @@ fn freecad_sketch_plane(
             axis_origin: source.plane.origin,
             axis_dir: datum.normal(),
             angle: format!("{} deg", angle.to_degrees()).into(),
+            line: None,
         };
     }
     Ok(plane)

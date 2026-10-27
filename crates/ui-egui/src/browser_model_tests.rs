@@ -66,7 +66,12 @@ fn imported_freecad_body_without_a_solid_keeps_its_bodies_folder() {
     let occurrence = created["occurrence"].as_u64().unwrap();
     h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
     h.app.run("sketch.finish", json!({})).unwrap();
-    h.app.session.doc_mut().metadata.set("org.solidcraft.freecad.body_components", json!({"ids":[component]})).unwrap();
+    h.app
+        .session
+        .doc_mut()
+        .metadata
+        .set(solidcraft_engine::doc::metadata::Owner::Design, "org.solidcraft.freecad.body_components", json!({"ids":[component]}))
+        .unwrap();
 
     super::prepare_model(&mut h.app);
     let mut cache = super::cache::Cache::default();

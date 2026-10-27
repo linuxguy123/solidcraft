@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::{Value, json};
 use solidcraft_doc::{
-    AxisRef, BodyName, Dir, Direction, Extent, ExtrudeConvention, FeatureKind, FeatureName, Operation, PatternKind, PlaneRef, Position,
-    RevolveConvention, SketchId,
+    AxisRef, BodyName, Dir, Direction, Extent, ExtrudeConvention, FeatureKind, Operation, PatternKind, PlaneRef, Position, RevolveConvention,
+    SketchId,
 };
 use solidcraft_geom::{Vec2, Vec3};
 use solidcraft_io::{FreeCadAxis, FreeCadOperation, FreeCadOperationSettings, FreeCadWarning, FreeCadWarningSeverity};
@@ -181,7 +181,7 @@ fn kind(
             return Err("A transformed operation has no profile sketch.".into());
         }
     };
-    super::super::features::stable_profiles(s, &mut feature).map_err(|error| error.to_string())?;
+    super::super::features::stable_profiles(s, &mut feature, false).map_err(|error| error.to_string())?;
     Ok(feature)
 }
 
@@ -273,8 +273,8 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                 .get(original)
                 .and_then(|outcome| outcome.source_feature.as_deref())
                 .and_then(|name| s.doc.find_feature(name))
-                .map(|feature| (feature.name.clone(), feature.component));
-            if let Some((source_name, component)) = source {
+                .map(|feature| (feature.id.into(), feature.component));
+            if let Some((source_feature, component)) = source {
                 let source_is_first_pad = by_name.get(original.as_str()).is_some_and(|source| {
                     source.base.is_none() && matches!(source.settings, Some(FreeCadOperationSettings::Extrude { cut: false, .. }))
                 });
@@ -291,7 +291,7 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                             ));
                         }
                         Some(FeatureKind::Mirror {
-                            features: if mirror_body { Vec::new() } else { vec![FeatureName(source_name.clone())] },
+                            features: if mirror_body { Vec::new() } else { vec![source_feature] },
                             plane: PlaneRef::Custom { plane: *plane },
                             bodies: if mirror_body { body.into_iter().map(BodyName).collect() } else { Vec::new() },
                             combine: mirror_body,
@@ -299,7 +299,7 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                         })
                     }
                     FreeCadOperationSettings::PolarPattern { origin, axis, count, angle, reversed, .. } => Some(FeatureKind::Pattern {
-                        features: vec![FeatureName(source_name.clone())],
+                        features: vec![source_feature],
                         pattern: PatternKind::Circular {
                             origin: Position(*origin),
                             axis: Dir(*axis),
@@ -307,6 +307,7 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
                             angle: format!("{angle} deg").into(),
                             alignment: solidcraft_sketch::PatternAlignment::Right,
                             reversed: *reversed,
+                            axis_ref: None,
                             axis_feature: None,
                         },
                         bodies: Vec::new(),
@@ -560,7 +561,11 @@ pub(super) fn import(s: &mut Session, operations: &[FreeCadOperation], sketches:
             }
         }
         let omitted = reports.len().saturating_sub(saved.len());
-        s.doc_mut().metadata.set("org.solidcraft.freecad.operations", json!({"last_import": saved, "omitted": omitted}))?;
+        s.doc_mut().metadata.set(
+            solidcraft_doc::metadata::Owner::Design,
+            "org.solidcraft.freecad.operations",
+            json!({"last_import": saved, "omitted": omitted}),
+        )?;
     }
     Ok(reports)
 }
