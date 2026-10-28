@@ -324,7 +324,7 @@ fn import_freecad_sketches(s: &mut Session, p: &Value) -> Result<Value> {
         Some(Value::Bool(value)) => *value,
         Some(_) => return Err(bad(cmd, "`preserve_planes` must be true or false")),
     };
-    let requested = p.get("sketches").filter(|v| !v.is_null()).map(|_| string_list(p, "sketches"));
+    let requested = p.get("sketches").filter(|v| !v.is_null()).map(|_| string_list(cmd, p, "sketches")).transpose()?;
     if requested.as_ref().is_some_and(Vec::is_empty) && operations.is_empty() {
         return Err(bad(cmd, "`sketches` must contain at least one source sketch name"));
     }

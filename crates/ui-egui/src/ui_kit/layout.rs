@@ -275,7 +275,13 @@ pub(crate) fn section<R>(ui: &mut Ui, id: impl egui::AsIdSalt, title: &str, defa
 }
 
 /// Prominent section heading for the main groups in a dialog.
-pub(crate) fn prominent_section<R>(ui: &mut Ui, id: impl egui::AsIdSalt, title: &str, default_open: bool, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+pub(crate) fn prominent_section<R>(
+    ui: &mut Ui,
+    id: impl egui::AsIdSalt,
+    title: &str,
+    default_open: bool,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
     section_with_badge(ui, id, title, default_open, (None, false, false, true), add)
 }
 
@@ -342,11 +348,14 @@ fn section_with_badge<R>(
     ui.add_space(t.space_2);
     let id = ui.make_persistent_id(id);
     let mut open = !pending && (searching || ui.ctx().data_mut(|data| data.get_persisted::<bool>(id)).unwrap_or(default_open));
-    let height = if prominent { row_height().max(font_size + t.space_12) } else if compact { t.control_height - t.space_4 } else { row_height() };
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(dimension(ui.available_width()), height),
-        egui::Sense::click(),
-    );
+    let height = if prominent {
+        row_height().max(font_size + t.space_12)
+    } else if compact {
+        t.control_height - t.space_4
+    } else {
+        row_height()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), height), egui::Sense::click());
     crate::prefs_search::follow(ui, title, rect);
     if response.hovered() || response.has_focus() {
         ui.painter().rect_filled(rect.shrink2(vec2(0.0, 1.0)), t.radius_sm, t.hover);

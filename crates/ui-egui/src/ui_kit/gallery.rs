@@ -834,8 +834,8 @@ const ELEMENTS: &[Element] = &[
     element!("section_count", |ui, _| {
         section_count(ui, "count", "Parameters", false, Some(5), |_| {});
     }),
-    element!("section_heading", |ui, _| {
-        section_heading(ui, "heading", "Sketches", true, |ui| {
+    element!("prominent_section", |ui, _| {
+        prominent_section(ui, "heading", "Sketches", true, |ui| {
             text(ui, "Imported sketch", Text::Inline);
         });
     }),
