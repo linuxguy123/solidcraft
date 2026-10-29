@@ -213,7 +213,19 @@ fn feature_row(
     let r = draw_row(
         ui,
         ui.id().with(("browser_feature", id)),
-        &Row { depth, fold, eye, icon, label: &label, selected, dim: dim || (!is_sketch && eye == Some(false)), action, mark, color, ..Default::default() },
+        &Row {
+            depth,
+            fold,
+            eye,
+            icon,
+            label: &label,
+            selected,
+            dim: dim || (!is_sketch && eye == Some(false)),
+            action,
+            mark,
+            color,
+            ..Default::default()
+        },
     );
     if r.eye && is_sketch {
         crate::browser::set_sketch_visible(app, id, !visible);
